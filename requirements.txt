@@ -6,3 +6,4 @@ pypdf
 sentence-transformers
 google-genai
 langchain-text-splitters
+torchvision
