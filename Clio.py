@@ -427,6 +427,8 @@ FRAGMENTOS RECUPERADOS DE LOS MANUALES OFICIALES:
 {contexto_filtrado if contexto_filtrado else "No se encontraron fragmentos relevantes."}
 \"\"\"
 
+Instrucción de extracción estricta: Responde ÚNICAMENTE con los datos explícitos del texto. Queda estrictamente prohibido suponer, deducir o inventar cargos, puestos o actividades que no aparezcan literalmente escritos en el documento.
+
 REGLAS DE RESPUESTA UNIVERSALES:
 1. EXPLICACIÓN COMPLETA DE PROCESOS:
    - Al explicar el inicio, detonador o conclusión de cualquier proceso, NO te limites a los resúmenes ejecutivos de carátula si la documentación contiene la matriz detallada de actividades.
