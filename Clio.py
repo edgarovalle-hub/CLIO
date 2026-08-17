@@ -19,7 +19,7 @@ from google.genai.errors import APIError
 # 1. Configuración General
 # ------------------------------------------------------------------------------
 ROOT_FOLDER_ID = "1EOtPbfr9tH0lhvB4KK9JRb3MA_QjJUzp"
-MODEL_NAME = "gemini-2.5-flash" 
+MODEL_NAME = "gemini-2.5-flash-lite" 
 INDEX_FILE = "faiss_index.bin"
 CHUNKS_FILE = "chunks_data.pkl"
 
