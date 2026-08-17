@@ -221,7 +221,6 @@ def buscar_contexto_relevante(pregunta):
 
     query_lower = pregunta.lower()
     
-    # 1. Limpieza de palabras irrelevantes o conectores
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
         "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
@@ -235,10 +234,9 @@ def buscar_contexto_relevante(pregunta):
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
-    # Diccionario para almacenar la puntuación de cada fragmento
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 2. Puntuación Vectorial (Similitud Semántica)
+    # 1. Puntuación Vectorial (Similitud Semántica)
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
@@ -248,7 +246,7 @@ def buscar_contexto_relevante(pregunta):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 1.5
 
-    # 3. Puntuación por Coincidencia Directa de Palabras Clave
+    # 2. Puntuación por Coincidencia de Palabras Clave
     if palabras_especificas:
         total_kw = len(palabras_especificas)
         for c in chunks_data:
@@ -258,33 +256,42 @@ def buscar_contexto_relevante(pregunta):
             matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower)
             matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower)
             
-            # Gran bonificación si el TÍTULO contiene TODAS las palabras solicitadas
             if matches_nombre == total_kw:
                 chunk_scores[c["chunk_id"]] += 5.0
             elif matches_nombre > 0:
                 chunk_scores[c["chunk_id"]] += (matches_nombre / total_kw) * 2.0
 
-            # Bonificación si el CONTENIDO contiene TODAS las palabras
             if matches_texto == total_kw:
                 chunk_scores[c["chunk_id"]] += 3.0
             elif matches_texto > 0:
                 chunk_scores[c["chunk_id"]] += (matches_texto / total_kw) * 1.0
-                
-            # Extra si es matriz operativa de un documento coincidente
-            if c.get("es_matriz", False) and (matches_nombre > 0 or matches_texto > 0):
-                chunk_scores[c["chunk_id"]] += 1.0
 
-    # 4. Ordenar fragmentos por puntuación de mayor a menor
+    # 3. Identificar el/los documentos ganadores (Top Docs)
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
         reverse=True
     )
     
-    # Tomar los 10 mejores fragmentos con puntaje relevante
-    chunks_finales = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.1][:10]
+    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.5]
+    documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
 
-    # Ordenar cronológicamente por nombre de archivo y página para la lectura del LLM
+    chunks_finales = []
+    
+    # 4. Incluir los mejores fragmentos generales
+    for c in chunks_ordenados_por_score:
+        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 8:
+            chunks_finales.append(c)
+
+    # 5. INCLUSIÓN FORZADA: Si se solicita inicio/fin o proceso, traer la página "Fin de Procedimiento" del documento ganador
+    if documentos_principales:
+        for c in chunks_data:
+            if c["nombre_archivo"] in documentos_principales:
+                # Si el fragmento es el final explícito del manual y no está en la lista, se agrega obligatoriamente
+                if "[TIPO: ACTIVIDAD FINAL" in c["texto"] and c not in chunks_finales:
+                    chunks_finales.append(c)
+
+    # Ordenar cronológicamente por archivo y página para mantener coherencia en el prompt
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
     contexto_recuperado = ""
