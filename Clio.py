@@ -29,10 +29,24 @@ st.caption("Asistente virtual especializado en procesos y manuales operativos de
 
 @st.cache_resource
 def get_gemini_client():
-    api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+    # Depuración: Muestra en pantalla qué claves detecta Streamlit
+    claves_detectadas = list(st.secrets.keys()) if hasattr(st, "secrets") else []
+    
+    # Intento de búsqueda insensible a mayúsculas/minúsculas
+    api_key = None
+    if hasattr(st, "secrets"):
+        for k in st.secrets:
+            if k.lower() == "gemini_api_key":
+                api_key = st.secrets[k]
+                break
+
     if not api_key:
-        st.error("⚠️ No se encontró la GEMINI_API_KEY en .streamlit/secrets.toml")
+        api_key = os.getenv("GEMINI_API_KEY")
+
+    if not api_key:
+        st.error(f"⚠️ No se encontró la API Key. Claves detectadas en Secrets: {claves_detectadas}")
         st.stop()
+
     return genai.Client(api_key=api_key)
 
 client = get_gemini_client()
