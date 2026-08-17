@@ -219,29 +219,37 @@ def buscar_contexto_relevante(pregunta):
     if not chunks_data or not vector_index:
         return "", []
 
-    # 1. Búsqueda Vectorial por Similitud Coseno (Top 6 fragmentos)
+    query_lower = pregunta.lower()
+    # Extraer palabras clave relevantes (ignorando conectores cortos)
+    palabras_clave = [w for w in re.findall(r'\w+', query_lower) if len(w) > 3]
+
+    chunks_recuperados = []
+
+    # 1. Búsqueda directa por coincidencia de palabras clave o acrónimos en el archivo/texto
+    for chunk in chunks_data:
+        nombre_lower = chunk["nombre_archivo"].lower()
+        texto_lower = chunk["texto"].lower()
+        
+        # Si la pregunta coincide con palabras del título del PDF o el texto del chunk
+        if any(kw in nombre_lower or kw in texto_lower for kw in palabras_clave):
+            if chunk not in chunks_recuperados:
+                chunks_recuperados.append(chunk)
+
+    # 2. Búsqueda Vectorial por Similitud Coseno (Top 10)
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=6)
-    
-    chunks_recuperados = []
+    distances, indices = vector_index.search(q_vector, k=10)
     for idx in indices[0]:
-        if idx < len(chunks_data):
+        if idx < len(chunks_data) and chunks_data[idx] not in chunks_recuperados:
             chunks_recuperados.append(chunks_data[idx])
 
-    # 2. Identificar qué PDFs salieron en la búsqueda inicial
-    archivos_relevantes = set(c["nombre_archivo"] for c in chunks_recuperados)
-
-    # 3. Incluir las matrices SOLO de esos PDFs relevantes (evita enviar los 397 PDFs)
-    for chunk in chunks_data:
-        if chunk["nombre_archivo"] in archivos_relevantes and chunk.get("es_matriz", False):
-            if chunk not in chunks_recuperados:
-                chunks_recuperados.append(chunk)
+    # 3. Limitar a un máximo razonable de 12 fragmentos para no saturar los tokens de Gemini
+    chunks_finales = chunks_recuperados[:12]
 
     # Ordenar cronológicamente por archivo y página
-    chunks_ordenados = sorted(chunks_recuperados, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
+    chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
     contexto_recuperado = ""
     fuentes_usadas = set()
@@ -252,7 +260,6 @@ def buscar_contexto_relevante(pregunta):
         fuentes_usadas.add(f"{chunk['nombre_archivo']} (Pág. {chunk['pagina']})")
             
     return contexto_recuperado, sorted(list(fuentes_usadas))
-
 # ------------------------------------------------------------------------------
 # 5. Renderizado e Interfaz de Usuario
 # ------------------------------------------------------------------------------
