@@ -29,24 +29,16 @@ st.caption("Asistente virtual especializado en procesos y manuales operativos de
 
 @st.cache_resource
 def get_gemini_client():
-    # Depuración: Muestra en pantalla qué claves detecta Streamlit
-    claves_detectadas = list(st.secrets.keys()) if hasattr(st, "secrets") else []
-    
-    # Intento de búsqueda insensible a mayúsculas/minúsculas
-    api_key = None
-    if hasattr(st, "secrets"):
-        for k in st.secrets:
-            if k.lower() == "gemini_api_key":
-                api_key = st.secrets[k]
-                break
-
+    # Soporta tanto GEMINI_API_KEY como GEMINI_FREE_KEY o variables de entorno
+    api_key = (
+        st.secrets.get("GEMINI_API_KEY")
+        or st.secrets.get("GEMINI_FREE_KEY")
+        or os.getenv("GEMINI_API_KEY")
+        or os.getenv("GEMINI_FREE_KEY")
+    )
     if not api_key:
-        api_key = os.getenv("GEMINI_API_KEY")
-
-    if not api_key:
-        st.error(f"⚠️ No se encontró la API Key. Claves detectadas en Secrets: {claves_detectadas}")
+        st.error("⚠️ No se encontró la API Key en los secretos de Streamlit ni en las variables de entorno.")
         st.stop()
-
     return genai.Client(api_key=api_key)
 
 client = get_gemini_client()
@@ -58,7 +50,7 @@ def get_local_embedder():
 embedder = get_local_embedder()
 
 # ------------------------------------------------------------------------------
-# 2. Descarga de Drive y Extracción de Nombres
+# 2. Descarga de Drive y Extracción con Barra de Progreso
 # ------------------------------------------------------------------------------
 def escanear_carpetas_y_subcarpetas(folder_id, visitados=None):
     if visitados is None:
@@ -103,10 +95,18 @@ def limpiar_texto_pdf(texto):
     return texto.strip()
 
 def extraer_paginas_pdf(root_id):
-    file_ids = escanear_carpetas_y_subcarpetas(root_id)
+    file_ids = list(escanear_carpetas_y_subcarpetas(root_id))
+    total_archivos = len(file_ids)
     documentos_paginas = []
     
-    for file_id in file_ids:
+    barra_progreso = st.progress(0)
+    texto_estado = st.empty()
+    
+    for i, file_id in enumerate(file_ids, start=1):
+        porcentaje = i / total_archivos
+        barra_progreso.progress(porcentaje)
+        texto_estado.caption(f"📂 Descargando y procesando archivo **{i} de {total_archivos}**...")
+        
         download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
         try:
             pdf_res = requests.get(download_url)
@@ -134,10 +134,12 @@ def extraer_paginas_pdf(root_id):
         except Exception:
             continue
             
+    barra_progreso.empty()
+    texto_estado.empty()
     return documentos_paginas
 
 # ------------------------------------------------------------------------------
-# 3. Chunking con Overlap y Base Vectorial (Similitud Coseno)
+# 3. Chunking Inteligente y Base Vectorial
 # ------------------------------------------------------------------------------
 def crear_chunks_inteligentes(paginas_doc):
     text_splitter = RecursiveCharacterTextSplitter(
@@ -177,13 +179,14 @@ def crear_chunks_inteligentes(paginas_doc):
 
 @st.cache_resource
 def inicializar_base_vectorial(root_id):
-    # Cargar persistencia si existe
+    # Cargar los índices si ya fueron generados
     if os.path.exists(INDEX_FILE) and os.path.exists(CHUNKS_FILE):
         index = faiss.read_index(INDEX_FILE)
         with open(CHUNKS_FILE, "rb") as f:
             chunks = pickle.load(f)
         return index, chunks
 
+    # Generación completa si no existen los binarios
     paginas = extraer_paginas_pdf(root_id)
     if not paginas:
         return None, []
@@ -191,28 +194,26 @@ def inicializar_base_vectorial(root_id):
     chunks = crear_chunks_inteligentes(paginas)
     textos_chunks = [c["texto"] for c in chunks]
     
-    vectors = embedder.encode(textos_chunks, show_progress_bar=False)
-    vectors = np.array(vectors, dtype="float32")
+    with st.spinner(f"🧠 Generando vectores para {len(chunks)} fragmentos de texto..."):
+        vectors = embedder.encode(textos_chunks, show_progress_bar=True)
+        vectors = np.array(vectors, dtype="float32")
+        
+        faiss.normalize_L2(vectors)
+        dimension = vectors.shape[1]
+        index = faiss.IndexFlatIP(dimension)
+        index.add(vectors)
     
-    # Normalización para Similitud Coseno
-    faiss.normalize_L2(vectors)
-    
-    dimension = vectors.shape[1]
-    index = faiss.IndexFlatIP(dimension)  # IndexFlatIP para Cosine Similarity
-    index.add(vectors)
-    
-    # Guardar en disco
     faiss.write_index(index, INDEX_FILE)
     with open(CHUNKS_FILE, "wb") as f:
         pickle.dump(chunks, f)
     
     return index, chunks
 
-with st.spinner("Cargando y procesando manuales operativos..."):
-    vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
+# Carga inicial
+vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 
 # ------------------------------------------------------------------------------
-# 4. Búsqueda RAG Híbrida (Opción B: 1 Sola llamada ultra rápida)
+# 4. Búsqueda RAG Híbrida (Opción B)
 # ------------------------------------------------------------------------------
 def buscar_contexto_relevante(pregunta):
     if not chunks_data or not vector_index:
@@ -230,7 +231,7 @@ def buscar_contexto_relevante(pregunta):
         if idx < len(chunks_data):
             chunks_recuperados.append(chunks_data[idx])
 
-    # 2. Inclusión directa de Matrices de Actividades (Opción B)
+    # 2. Inclusión directa de Matrices de Actividades
     for chunk in chunks_data:
         if chunk.get("es_matriz", False) and chunk not in chunks_recuperados:
             chunks_recuperados.append(chunk)
@@ -299,7 +300,7 @@ for idx, message in enumerate(st.session_state.messages):
             st.markdown(message["content"])
 
 # ------------------------------------------------------------------------------
-# 6. Procesamiento con Generación y Medición de Tiempo
+# 6. Procesamiento de Preguntas y Medición de Tiempo
 # ------------------------------------------------------------------------------
 if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
     
@@ -312,7 +313,6 @@ if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
             try:
                 inicio_tiempo = time.time()
 
-                # Búsqueda directa ultra rápida sin reescritura pesada
                 contexto_filtrado, fuentes = buscar_contexto_relevante(prompt)
 
                 SYSTEM_PROMPT = f"""
