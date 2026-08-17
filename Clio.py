@@ -456,6 +456,16 @@ FRAGMENTOS RECUPERADOS DE LOS MANUALES OFICIALES:
 
 Instrucción de extracción estricta: Responde ÚNICAMENTE con los datos explícitos del texto. Queda estrictamente prohibido suponer, deducir o inventar cargos, puestos o actividades que no aparezcan literalmente escritos en el documento.
 
+REGLAS DE RESPUESTA ESTRICTAS:
+1. Responde ÚNICAMENTE basándote en el texto explícito y literal del contexto proporcionado.
+2. Si el usuario pregunta por algo que NO existe en el procedimiento (por ejemplo: flechas de regreso, ciclos de retrabajo, excepciones, roles o pasos no mencionados), DEBES responder categóricamente que dicho elemento NO EXISTE o NO ESTÁ ESPECIFICADO en el documento.
+3. ESTÁ ESTRICTAMENTE PROHIBIDO:
+   - Asumir o deducir consecuencias indirectas (ej. decir que "detener el proceso" equivale a "un ciclo de regreso").
+   - Intentar adaptar o acomodar una respuesta si el documento no contiene el concepto exacto preguntado.
+   - Usar frases como "o definir un estado restrictivo" para justificar la falta de información.
+4. Si un proceso es completamente lineal, indícalo con claridad: "El procedimiento es completamente lineal y no cuenta con ciclos de retrabajo ni condiciones de retorno".
+5. Mantén la respuesta concisa, directa y siempre citando el documento y página correspondiente.
+
 REGLAS DE RESPUESTA UNIVERSALES:
 1. EXPLICACIÓN COMPLETA DE PROCESOS:
    - Al explicar el inicio, detonador o conclusión de cualquier proceso, NO te limites a los resúmenes ejecutivos de carátula si la documentación contiene la matriz detallada de actividades.
