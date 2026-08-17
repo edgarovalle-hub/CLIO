@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import ftfy
 import unicodedata
 import time
 import pickle
@@ -217,9 +218,15 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # 4. Búsqueda RAG Híbrida (Opción B)
 # ------------------------------------------------------------------------------
 def normalizar_texto(texto):
-    """Elimina tildes, acentos y convierte a minúsculas para comparaciones exactas."""
+    """Limpia la codificación UTF-8 y elimina tildes/acentos."""
     if not texto:
         return ""
+    # Corregir errores de codificación (ej. DestrucciÃ³n -> Destrucción)
+    try:
+        texto = ftfy.fix_text(texto)
+    except Exception:
+        pass
+    
     texto_nfd = unicodedata.normalize('NFD', texto.lower())
     return "".join(c for c in texto_nfd if unicodedata.category(c) != 'Mn')
 
@@ -229,7 +236,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
 
     doc_activo_previo = None
 
-    # 1. Identificar si existe un documento activo en el historial reciente
+    # 1. Recuperar documento activo del historial
     if historial:
         for msg in reversed(historial):
             if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
@@ -252,16 +259,19 @@ def buscar_contexto_relevante(pregunta, historial=None):
         "actividad", "actividades", "manual", "politica", "política", "empresa", "saber",
         "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus",
         "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
-        "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion"
+        "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion",
+        "encargado", "ejecutar", "rol", "departamento"
     }
 
-    # Extraer palabras clave normalizadas (sin tildes) de la pregunta actual
     palabras_especificas = [
         w for w in re.findall(r'\w+', pregunta_norm) 
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
-    # 2. Evaluar coincidencia de título en la base de datos para detectar cambio de tema
+    # Extraer números específicos de la consulta (ej. '120')
+    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
+
+    # 2. Evaluar cambio de tema explícito
     mejor_doc_coincidente = None
     max_matches_titulo = 0
 
@@ -273,26 +283,24 @@ def buscar_contexto_relevante(pregunta, historial=None):
                 max_matches_titulo = matches
                 mejor_doc_coincidente = nombre_norm
 
-    # Determinar si el usuario está solicitando explícitamente un nuevo documento
     es_cambio_de_tema = False
     if mejor_doc_coincidente and (doc_activo_previo is None or mejor_doc_coincidente not in doc_activo_previo):
-        if max_matches_titulo >= 1:  # Con al menos 1 palabra fuerte del título (ej. "cartas" o "destruccion")
+        if max_matches_titulo >= 1:
             es_cambio_de_tema = True
 
-    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 3. Puntuación Vectorial
+    # 3. Busqueda vectorial basica
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=15)
+    distances, indices = vector_index.search(q_vector, k=20)
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 1.5
 
-    # 4. Asignación Jerárquica de Puntajes
+    # 4. Asignación de Prioridades Jerárquicas
     for c in chunks_data:
         nombre_norm = normalizar_texto(c["nombre_archivo"])
         texto_norm = normalizar_texto(c["texto"])
@@ -300,44 +308,39 @@ def buscar_contexto_relevante(pregunta, historial=None):
         matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_norm) if palabras_especificas else 0
         matches_texto = sum(1 for kw in palabras_especificas if kw in texto_norm) if palabras_especificas else 0
 
-        # CASO A: Se detectó un cambio de tema explícito -> Maximizar prioridad al nuevo documento
+        # CASO A: Cambio de tema detectado
         if es_cambio_de_tema and matches_nombre > 0:
             chunk_scores[c["chunk_id"]] += 30.0 + (matches_nombre * 5.0)
 
-        # CASO B: Continuidad de tema -> Mantener anclaje en el documento activo previo
+        # CASO B: Documento activo en uso
         elif doc_activo_previo and doc_activo_previo in nombre_norm and not es_cambio_de_tema:
             chunk_scores[c["chunk_id"]] += 25.0
 
-        # Números de Actividades solicitados
+        # REGLA CLAVE: Si se busca un número de actividad específico (ej. 120), se le da prioridad máxima
         if numeros_buscados:
-            matches_numeros = sum(1 for num in numeros_buscados if num in texto_norm or num in nombre_norm)
-            if matches_numeros == len(numeros_buscados):
-                chunk_scores[c["chunk_id"]] += 8.0
+            for num in numeros_buscados:
+                # Si el número aparece en el texto del chunk
+                if re.search(r'\b' + re.escape(num) + r'\b', texto_norm):
+                    # Si además pertenece al documento activo, sobrepuntuar fuertemente
+                    if doc_activo_previo and doc_activo_previo in nombre_norm:
+                        chunk_scores[c["chunk_id"]] += 50.0
+                    else:
+                        chunk_scores[c["chunk_id"]] += 15.0
 
-        # Coincidencia de contenido general
         if matches_texto > 0 and palabras_especificas:
             chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
 
-    # 5. Filtrar y ordenar los fragmentos recuperados
+    # 5. Selección final
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
         reverse=True
     )
-    
-    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.5]
-    documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
 
     chunks_finales = []
     for c in chunks_ordenados_por_score:
         if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
             chunks_finales.append(c)
-
-    if documentos_principales:
-        for c in chunks_data:
-            if c["nombre_archivo"] in documentos_principales:
-                if "[TIPO: ACTIVIDAD FINAL" in c["texto"] and c not in chunks_finales:
-                    chunks_finales.append(c)
 
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
@@ -345,9 +348,10 @@ def buscar_contexto_relevante(pregunta, historial=None):
     fuentes_usadas = set()
     
     for chunk in chunks_ordenados:
-        contexto_recuperado += f"\n--- [DOCUMENTO: {chunk['nombre_archivo']} | PÁGINA {chunk['pagina']}] ---\n"
+        nombre_limpio = ftfy.fix_text(chunk['nombre_archivo']) if 'ftfy' in globals() else chunk['nombre_archivo']
+        contexto_recuperado += f"\n--- [DOCUMENTO: {nombre_limpio} | PÁGINA {chunk['pagina']}] ---\n"
         contexto_recuperado += chunk['texto'] + "\n"
-        fuentes_usadas.add(f"{chunk['nombre_archivo']} (Pág. {chunk['pagina']})")
+        fuentes_usadas.add(f"{nombre_limpio} (Pág. {chunk['pagina']})")
             
     return contexto_recuperado, sorted(list(fuentes_usadas))
 # ------------------------------------------------------------------------------
