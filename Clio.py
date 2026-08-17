@@ -219,7 +219,7 @@ def buscar_contexto_relevante(pregunta):
     if not chunks_data or not vector_index:
         return "", []
 
-    # 1. Búsqueda Vectorial por Similitud Coseno
+    # 1. Búsqueda Vectorial por Similitud Coseno (Top 6 fragmentos)
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
@@ -231,10 +231,14 @@ def buscar_contexto_relevante(pregunta):
         if idx < len(chunks_data):
             chunks_recuperados.append(chunks_data[idx])
 
-    # 2. Inclusión directa de Matrices de Actividades
+    # 2. Identificar qué PDFs salieron en la búsqueda inicial
+    archivos_relevantes = set(c["nombre_archivo"] for c in chunks_recuperados)
+
+    # 3. Incluir las matrices SOLO de esos PDFs relevantes (evita enviar los 397 PDFs)
     for chunk in chunks_data:
-        if chunk.get("es_matriz", False) and chunk not in chunks_recuperados:
-            chunks_recuperados.append(chunk)
+        if chunk["nombre_archivo"] in archivos_relevantes and chunk.get("es_matriz", False):
+            if chunk not in chunks_recuperados:
+                chunks_recuperados.append(chunk)
 
     # Ordenar cronológicamente por archivo y página
     chunks_ordenados = sorted(chunks_recuperados, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
