@@ -217,34 +217,6 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida (Opción B)
 # ------------------------------------------------------------------------------
-def normalizar_texto(texto):
-    """Limpia la codificación UTF-8 y elimina tildes/acentos."""
-    if not texto:
-        return ""
-    # Corregir errores de codificación (ej. DestrucciÃ³n -> Destrucción)
-    try:
-        texto = ftfy.fix_text(texto)
-    except Exception:
-        pass
-    
-    texto_nfd = unicodedata.normalize('NFD', texto.lower())
-    return "".join(c for c in texto_nfd if unicodedata.category(c) != 'Mn')
-
-def corregir_utf8_corrupto(texto):
-    if not texto:
-        return ""
-    try:
-        return texto.encode('latin-1').decode('utf-8')
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        return texto
-
-def normalizar_texto(texto):
-    if not texto:
-        return ""
-    texto = corregir_utf8_corrupto(texto)
-    texto_nfd = unicodedata.normalize('NFD', texto.lower())
-    return "".join(c for c in texto_nfd if unicodedata.category(c) != 'Mn')
-
 def corregir_utf8_corrupto(texto):
     if not texto:
         return ""
@@ -276,7 +248,7 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
         "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
         "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion",
         "encargado", "ejecutar", "rol", "departamento", "tiene", "indícame", "indicame",
-        "flecha", "regreso", "retrabajo", "ciclo", "regresa", "sale"
+        "flecha", "regreso", "retrabajo", "ciclo", "regresa", "sale", "que", "exacta", "sigue"
     }
 
     palabras_especificas = [
@@ -286,7 +258,7 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
 
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
 
-    # 1. Detectar si la pregunta solicita EXPLÍCITAMENTE un NUEVO manual
+    # 1. Detectar si el usuario solicita EXPLÍCITAMENTE cambiar de documento
     mejor_doc_coincidente = None
     max_matches_titulo = 0
 
@@ -301,15 +273,21 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
     es_cambio_de_tema = False
     if mejor_doc_coincidente:
         doc_coincidente_norm = normalizar_texto(mejor_doc_coincidente)
-        # Solo cambia de tema si hay al menos 1 coincidencia en el título de UN MANUAL DISTINTO
+        # Solo cambia de tema si hay coincidencia explícita con el TÍTULO de OTRO documento
         if doc_activo_norm is None or doc_coincidente_norm not in doc_activo_norm:
             if max_matches_titulo >= 1:
                 es_cambio_de_tema = True
 
+    # 2. Inyección del Documento Activo en la Búsqueda Vectorial (Query Contextual)
+    if doc_activo_actual and not es_cambio_de_tema:
+        pregunta_busqueda = f"En el documento {doc_activo_actual}: {pregunta}"
+    else:
+        pregunta_busqueda = pregunta
+
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 2. Puntuación Vectorial
-    q_vector = embedder.encode([pregunta])
+    # Vectorización
+    q_vector = embedder.encode([pregunta_busqueda])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
@@ -318,7 +296,7 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 1.5
 
-    # 3. Puntuación Jerárquica y Anclaje Estricto
+    # 3. Puntuación Jerárquica y Anclaje
     nuevo_doc_activo = doc_activo_actual
 
     for c in chunks_data:
@@ -328,24 +306,28 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
         matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_norm) if palabras_especificas else 0
         matches_texto = sum(1 for kw in palabras_especificas if kw in texto_norm) if palabras_especificas else 0
 
-        # CASO A: Solicitud explícita de cambio de documento
+        # CASO A: Solicitud de cambio de documento
         if es_cambio_de_tema and mejor_doc_coincidente and normalizar_texto(mejor_doc_coincidente) in nombre_norm:
             chunk_scores[c["chunk_id"]] += 100.0
             nuevo_doc_activo = mejor_doc_coincidente
 
-        # CASO B: Continuidad en el manual activo (Bloqueo prioritario +150.0)
+        # CASO B: Bloqueo de continuidad en el documento activo (+150.0)
         elif doc_activo_norm and doc_activo_norm in nombre_norm and not es_cambio_de_tema:
             chunk_scores[c["chunk_id"]] += 150.0
 
+        # Prioridad a números de actividad
         if numeros_buscados:
             for num in numeros_buscados:
                 if re.search(r'\b' + re.escape(num) + r'\b', texto_norm):
-                    chunk_scores[c["chunk_id"]] += 30.0
+                    if doc_activo_norm and doc_activo_norm in nombre_norm:
+                        chunk_scores[c["chunk_id"]] += 50.0
+                    else:
+                        chunk_scores[c["chunk_id"]] += 20.0
 
         if matches_texto > 0 and palabras_especificas:
             chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
 
-    # 4. Filtrado de chunks
+    # 4. Ordenar y seleccionar fragmentos
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
@@ -357,7 +339,6 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
         if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
             chunks_finales.append(c)
 
-    # Definir el documento ganador para actualizar la memoria
     if chunks_finales and (nuevo_doc_activo is None or es_cambio_de_tema):
         nuevo_doc_activo = chunks_finales[0]["nombre_archivo"]
 
@@ -426,6 +407,9 @@ for idx, message in enumerate(st.session_state.messages):
 # ------------------------------------------------------------------------------
 # 6. Procesamiento de Preguntas y Medición de Tiempo
 # ------------------------------------------------------------------------------
+if "doc_activo" not in st.session_state:
+    st.session_state.doc_activo = None
+
 if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
     
     st.session_state.messages.append({"role": "user", "content": prompt})
