@@ -245,27 +245,28 @@ def normalizar_texto(texto):
     texto_nfd = unicodedata.normalize('NFD', texto.lower())
     return "".join(c for c in texto_nfd if unicodedata.category(c) != 'Mn')
 
-def buscar_contexto_relevante(pregunta, historial=None):
+def corregir_utf8_corrupto(texto):
+    if not texto:
+        return ""
+    try:
+        return texto.encode('latin-1').decode('utf-8')
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return texto
+
+def normalizar_texto(texto):
+    if not texto:
+        return ""
+    texto = corregir_utf8_corrupto(texto)
+    texto_nfd = unicodedata.normalize('NFD', texto.lower())
+    return "".join(c for c in texto_nfd if unicodedata.category(c) != 'Mn')
+
+def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
     if not chunks_data or not vector_index:
-        return "", []
-
-    doc_activo_previo = None
-
-    # 1. Capturar el documento activo del historial (Regex mejorado para espacios y tildes)
-    if historial:
-        for msg in reversed(historial):
-            if msg["role"] == "assistant":
-                content = msg.get("content", "")
-                if "---FUENTE---" in content or "Referencia:" in content:
-                    # Busca cualquier secuencia que termine en .pdf permitiendo letras, números, espacios, guiones y tildes
-                    matches = re.findall(r'([\w\s\dÁÉÍÓÚáéíóúÑñ.-]+\.pdf)', content, re.IGNORECASE)
-                    if matches:
-                        # Tomamos el primer PDF listado como el activo principal
-                        doc_activo_previo = normalizar_texto(matches[0].strip())
-                        break
+        return "", [], None
 
     pregunta_norm = normalizar_texto(pregunta)
-    
+    doc_activo_norm = normalizar_texto(doc_activo_actual) if doc_activo_actual else None
+
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
         "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
@@ -274,7 +275,8 @@ def buscar_contexto_relevante(pregunta, historial=None):
         "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus",
         "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
         "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion",
-        "encargado", "ejecutar", "rol", "departamento", "tiene", "indícame", "indicame"
+        "encargado", "ejecutar", "rol", "departamento", "tiene", "indícame", "indicame",
+        "flecha", "regreso", "retrabajo", "ciclo", "regresa", "sale"
     }
 
     palabras_especificas = [
@@ -284,7 +286,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
 
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
 
-    # 2. Evaluar si el usuario está solicitando un CAMBIO DE TEMA explícito
+    # 1. Detectar si la pregunta solicita EXPLÍCITAMENTE un NUEVO manual
     mejor_doc_coincidente = None
     max_matches_titulo = 0
 
@@ -294,27 +296,31 @@ def buscar_contexto_relevante(pregunta, historial=None):
             matches = sum(1 for kw in palabras_especificas if kw in nombre_norm)
             if matches > max_matches_titulo:
                 max_matches_titulo = matches
-                mejor_doc_coincidente = nombre_norm
+                mejor_doc_coincidente = c["nombre_archivo"]
 
     es_cambio_de_tema = False
-    # Solo se considera cambio de tema si coincide con el TÍTULO de OTRO documento distinto
-    if mejor_doc_coincidente and (doc_activo_previo is None or mejor_doc_coincidente not in doc_activo_previo):
-        if max_matches_titulo >= 1:
-            es_cambio_de_tema = True
+    if mejor_doc_coincidente:
+        doc_coincidente_norm = normalizar_texto(mejor_doc_coincidente)
+        # Solo cambia de tema si hay al menos 1 coincidencia en el título de UN MANUAL DISTINTO
+        if doc_activo_norm is None or doc_coincidente_norm not in doc_activo_norm:
+            if max_matches_titulo >= 1:
+                es_cambio_de_tema = True
 
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 3. Puntuación Vectorial
+    # 2. Puntuación Vectorial
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=20)
+    distances, indices = vector_index.search(q_vector, k=25)
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 1.5
 
-    # 4. Asignación de Prioridades Jerárquicas
+    # 3. Puntuación Jerárquica y Anclaje Estricto
+    nuevo_doc_activo = doc_activo_actual
+
     for c in chunks_data:
         nombre_norm = normalizar_texto(c["nombre_archivo"])
         texto_norm = normalizar_texto(c["texto"])
@@ -322,15 +328,15 @@ def buscar_contexto_relevante(pregunta, historial=None):
         matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_norm) if palabras_especificas else 0
         matches_texto = sum(1 for kw in palabras_especificas if kw in texto_norm) if palabras_especificas else 0
 
-        # CASO A: Se solicitó explícitamente otro manual
-        if es_cambio_de_tema and matches_nombre > 0:
-            chunk_scores[c["chunk_id"]] += 50.0 + (matches_nombre * 5.0)
-
-        # CASO B: CONTINUIDAD (Sticky Anclaje Fuerte +100.0)
-        elif doc_activo_previo and doc_activo_previo in nombre_norm and not es_cambio_de_tema:
+        # CASO A: Solicitud explícita de cambio de documento
+        if es_cambio_de_tema and mejor_doc_coincidente and normalizar_texto(mejor_doc_coincidente) in nombre_norm:
             chunk_scores[c["chunk_id"]] += 100.0
+            nuevo_doc_activo = mejor_doc_coincidente
 
-        # Prioridad por números de actividad
+        # CASO B: Continuidad en el manual activo (Bloqueo prioritario +150.0)
+        elif doc_activo_norm and doc_activo_norm in nombre_norm and not es_cambio_de_tema:
+            chunk_scores[c["chunk_id"]] += 150.0
+
         if numeros_buscados:
             for num in numeros_buscados:
                 if re.search(r'\b' + re.escape(num) + r'\b', texto_norm):
@@ -339,7 +345,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if matches_texto > 0 and palabras_especificas:
             chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
 
-    # 5. Filtrar y ordenar
+    # 4. Filtrado de chunks
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
@@ -350,6 +356,10 @@ def buscar_contexto_relevante(pregunta, historial=None):
     for c in chunks_ordenados_por_score:
         if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
             chunks_finales.append(c)
+
+    # Definir el documento ganador para actualizar la memoria
+    if chunks_finales and (nuevo_doc_activo is None or es_cambio_de_tema):
+        nuevo_doc_activo = chunks_finales[0]["nombre_archivo"]
 
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
@@ -362,7 +372,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
         contexto_recuperado += chunk['texto'] + "\n"
         fuentes_usadas.add(f"{nombre_limpio} (Pág. {chunk['pagina']})")
             
-    return contexto_recuperado, sorted(list(fuentes_usadas))
+    return contexto_recuperado, sorted(list(fuentes_usadas)), nuevo_doc_activo
 # ------------------------------------------------------------------------------
 # 5. Renderizado e Interfaz de Usuario
 # ------------------------------------------------------------------------------
@@ -427,10 +437,14 @@ if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
             try:
                 inicio_tiempo = time.time()
 
-                contexto_filtrado, fuentes = buscar_contexto_relevante(
-                    prompt, 
-                    historial=st.session_state.messages
+                contexto_filtrado, fuentes, nuevo_doc = buscar_contexto_relevante(
+                    prompt,
+                    doc_activo_actual=st.session_state.get("doc_activo", None)
                 )
+                
+                # Actualizar el documento activo en la memoria de sesión
+                if nuevo_doc:
+                    st.session_state.doc_activo = nuevo_doc
 
                 SYSTEM_PROMPT = f"""
 Eres Clio, el asistente virtual oficial de la empresa. Tu objetivo es explicar procesos, políticas y manuales operativos con máximo detalle, exactitud profesional y rigor.
