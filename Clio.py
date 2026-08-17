@@ -219,12 +219,10 @@ def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
 
-    # 1. Unir los últimos mensajes del usuario para conservar el contexto del documento
     query_contextual = pregunta
     if historial:
         mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
         if mensajes_usuario:
-            # Concatena las últimas 2 preguntas del usuario para no perder nombres/códigos previos
             query_contextual = " ".join(mensajes_usuario[-2:])
 
     query_lower = query_contextual.lower()
@@ -234,17 +232,23 @@ def buscar_contexto_relevante(pregunta, historial=None):
         "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
         "cual", "cuál", "como", "cómo", "para", "donde", "dónde", "pasos",
         "actividad", "actividades", "manual", "politica", "política", "empresa", "saber",
-        "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus"
+        "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus",
+        "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
+        "conector", "pasa", "directo", "otro"
     }
 
+    # Extraer palabras no genéricas
     palabras_especificas = [
         w for w in re.findall(r'\w+', query_lower) 
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
+    # Extraer todos los números/IDs mencionados en la consulta (ej. "140", "150")
+    numeros_buscados = set(re.findall(r'\b\d+\b', query_contextual))
+
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 2. Puntuación Vectorial utilizando el prompt contextualizado
+    # 1. Similitud Vectorial
     q_vector = embedder.encode([query_contextual])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
@@ -254,27 +258,33 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 1.5
 
-    # 3. Puntuación por Coincidencia de Palabras Clave
-    if palabras_especificas:
-        total_kw = len(palabras_especificas)
-        for c in chunks_data:
-            nombre_lower = c["nombre_archivo"].lower()
-            texto_lower = c["texto"].lower()
-            
+    # 2. Evaluador de Palabras y Números
+    for c in chunks_data:
+        nombre_lower = c["nombre_archivo"].lower()
+        texto_lower = c["texto"].lower()
+        
+        # BONIFICACIÓN CRÍTICA: Si el fragmento contiene los números buscados (ej. Actividades 140 o 150)
+        if numeros_buscados:
+            matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
+            if matches_numeros == len(numeros_buscados):
+                chunk_scores[c["chunk_id"]] += 8.0  # Coincidencia exacta de todos los IDs solicitados
+            elif matches_numeros > 0:
+                chunk_scores[c["chunk_id"]] += 4.0
+
+        # Bonificación por palabras específicas
+        if palabras_especificas:
             matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower)
             matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower)
             
-            if matches_nombre == total_kw:
+            if matches_nombre == len(palabras_especificas):
                 chunk_scores[c["chunk_id"]] += 5.0
             elif matches_nombre > 0:
-                chunk_scores[c["chunk_id"]] += (matches_nombre / total_kw) * 2.0
+                chunk_scores[c["chunk_id"]] += 2.0
 
-            if matches_texto == total_kw:
+            if matches_texto == len(palabras_especificas):
                 chunk_scores[c["chunk_id"]] += 3.0
-            elif matches_texto > 0:
-                chunk_scores[c["chunk_id"]] += (matches_texto / total_kw) * 1.0
 
-    # 4. Identificar el/los documentos ganadores
+    # 3. Filtrar y ordenar los mejores resultados
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
@@ -285,12 +295,11 @@ def buscar_contexto_relevante(pregunta, historial=None):
     documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
 
     chunks_finales = []
-    
     for c in chunks_ordenados_por_score:
-        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 8:
+        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
             chunks_finales.append(c)
 
-    # 5. Inclusión forzada de la página de "Fin de Procedimiento" del documento en discusión
+    # Inclusión forzada de Actividad Final si aplica
     if documentos_principales:
         for c in chunks_data:
             if c["nombre_archivo"] in documentos_principales:
