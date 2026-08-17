@@ -220,33 +220,46 @@ def buscar_contexto_relevante(pregunta):
         return "", []
 
     query_lower = pregunta.lower()
-    # Extraer palabras clave relevantes (ignorando conectores cortos)
-    palabras_clave = [w for w in re.findall(r'\w+', query_lower) if len(w) > 3]
+    
+    # 1. Palabras genéricas a ignorar para evitar falsos positivos masivos
+    STOPWORDS_OPERATIVAS = {
+        "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
+        "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
+        "cual", "cuál", "como", "cómo", "para", "donde", "dónde", "pasos",
+        "actividad", "actividades", "manual", "politica", "política", "empresa", "saber"
+    }
+
+    # Extraer únicamente palabras verdaderamente específicas (ej. "fichas", "redimibles")
+    palabras_especificas = [
+        w for w in re.findall(r'\w+', query_lower) 
+        if len(w) > 3 and w not in STOPWORDS_OPERATIVAS
+    ]
 
     chunks_recuperados = []
 
-    # 1. Búsqueda directa por coincidencia de palabras clave o acrónimos en el archivo/texto
-    for chunk in chunks_data:
-        nombre_lower = chunk["nombre_archivo"].lower()
-        texto_lower = chunk["texto"].lower()
-        
-        # Si la pregunta coincide con palabras del título del PDF o el texto del chunk
-        if any(kw in nombre_lower or kw in texto_lower for kw in palabras_clave):
-            if chunk not in chunks_recuperados:
-                chunks_recuperados.append(chunk)
-
-    # 2. Búsqueda Vectorial por Similitud Coseno (Top 10)
+    # 2. Búsqueda Vectorial por Similitud Coseno (PRIORIDAD ALTA: Top 8 por significado)
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=10)
+    distances, indices = vector_index.search(q_vector, k=8)
     for idx in indices[0]:
-        if idx < len(chunks_data) and chunks_data[idx] not in chunks_recuperados:
+        if idx < len(chunks_data):
             chunks_recuperados.append(chunks_data[idx])
 
-    # 3. Limitar a un máximo razonable de 12 fragmentos para no saturar los tokens de Gemini
-    chunks_finales = chunks_recuperados[:12]
+    # 3. Búsqueda por Palabras Clave Específicas (Complemento si hay términos exactos)
+    if palabras_especificas:
+        for chunk in chunks_data:
+            nombre_lower = chunk["nombre_archivo"].lower()
+            texto_lower = chunk["texto"].lower()
+            
+            # Coincidencia con palabras clave reales (no genéricas)
+            if any(kw in nombre_lower or kw in texto_lower for kw in palabras_especificas):
+                if chunk not in chunks_recuperados:
+                    chunks_recuperados.append(chunk)
+
+    # Top 10 fragmentos más relevantes
+    chunks_finales = chunks_recuperados[:10]
 
     # Ordenar cronológicamente por archivo y página
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
