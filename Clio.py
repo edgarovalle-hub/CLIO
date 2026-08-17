@@ -221,47 +221,70 @@ def buscar_contexto_relevante(pregunta):
 
     query_lower = pregunta.lower()
     
-    # 1. Palabras genéricas a ignorar para evitar falsos positivos masivos
+    # 1. Limpieza de palabras irrelevantes o conectores
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
         "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
         "cual", "cuál", "como", "cómo", "para", "donde", "dónde", "pasos",
-        "actividad", "actividades", "manual", "politica", "política", "empresa", "saber"
+        "actividad", "actividades", "manual", "politica", "política", "empresa", "saber",
+        "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos"
     }
 
-    # Extraer únicamente palabras verdaderamente específicas (ej. "fichas", "redimibles")
     palabras_especificas = [
         w for w in re.findall(r'\w+', query_lower) 
-        if len(w) > 3 and w not in STOPWORDS_OPERATIVAS
+        if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
-    chunks_recuperados = []
+    # Diccionario para almacenar la puntuación de cada fragmento
+    chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 2. Búsqueda Vectorial por Similitud Coseno (PRIORIDAD ALTA: Top 8 por significado)
+    # 2. Puntuación Vectorial (Similitud Semántica)
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=8)
-    for idx in indices[0]:
+    distances, indices = vector_index.search(q_vector, k=15)
+    for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            chunks_recuperados.append(chunks_data[idx])
+            chunk_scores[idx] += float(sim) * 1.5
 
-    # 3. Búsqueda por Palabras Clave Específicas (Complemento si hay términos exactos)
+    # 3. Puntuación por Coincidencia Directa de Palabras Clave
     if palabras_especificas:
-        for chunk in chunks_data:
-            nombre_lower = chunk["nombre_archivo"].lower()
-            texto_lower = chunk["texto"].lower()
+        total_kw = len(palabras_especificas)
+        for c in chunks_data:
+            nombre_lower = c["nombre_archivo"].lower()
+            texto_lower = c["texto"].lower()
             
-            # Coincidencia con palabras clave reales (no genéricas)
-            if any(kw in nombre_lower or kw in texto_lower for kw in palabras_especificas):
-                if chunk not in chunks_recuperados:
-                    chunks_recuperados.append(chunk)
+            matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower)
+            matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower)
+            
+            # Gran bonificación si el TÍTULO contiene TODAS las palabras solicitadas
+            if matches_nombre == total_kw:
+                chunk_scores[c["chunk_id"]] += 5.0
+            elif matches_nombre > 0:
+                chunk_scores[c["chunk_id"]] += (matches_nombre / total_kw) * 2.0
 
-    # Top 10 fragmentos más relevantes
-    chunks_finales = chunks_recuperados[:10]
+            # Bonificación si el CONTENIDO contiene TODAS las palabras
+            if matches_texto == total_kw:
+                chunk_scores[c["chunk_id"]] += 3.0
+            elif matches_texto > 0:
+                chunk_scores[c["chunk_id"]] += (matches_texto / total_kw) * 1.0
+                
+            # Extra si es matriz operativa de un documento coincidente
+            if c.get("es_matriz", False) and (matches_nombre > 0 or matches_texto > 0):
+                chunk_scores[c["chunk_id"]] += 1.0
 
-    # Ordenar cronológicamente por archivo y página
+    # 4. Ordenar fragmentos por puntuación de mayor a menor
+    chunks_ordenados_por_score = sorted(
+        chunks_data, 
+        key=lambda c: chunk_scores[c["chunk_id"]], 
+        reverse=True
+    )
+    
+    # Tomar los 10 mejores fragmentos con puntaje relevante
+    chunks_finales = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.1][:10]
+
+    # Ordenar cronológicamente por nombre de archivo y página para la lectura del LLM
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
     contexto_recuperado = ""
