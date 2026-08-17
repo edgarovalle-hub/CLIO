@@ -222,7 +222,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
     query_contextual = pregunta
     doc_activo_previo = None
 
-    # 1. Recuperar el documento activo del historial reciente
+    # 1. Identificar si ya existe un documento activo en el historial reciente
     if historial:
         mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
         if mensajes_usuario:
@@ -240,7 +240,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
                 if doc_activo_previo:
                     break
 
-    query_lower = pregunta.lower() # Evaluar la pregunta actual para detectar cambios explícitos de tema
+    query_lower = pregunta.lower()
     
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
@@ -249,7 +249,8 @@ def buscar_contexto_relevante(pregunta, historial=None):
         "actividad", "actividades", "manual", "politica", "política", "empresa", "saber",
         "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus",
         "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
-        "conector", "pasa", "directo", "otro"
+        "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion",
+        "identifica", "puntos", "cada", "tipo", "exclusivo", "evalua", "opciones", "secuencial", "paralelo"
     }
 
     palabras_especificas = [
@@ -257,10 +258,21 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
+    # 2. Verificar si la pregunta del usuario menciona explícitamente UN NUEVO MANUAL
+    usuario_solicita_nuevo_doc = False
+    if palabras_especificas:
+        for c in chunks_data:
+            nombre_lower = c["nombre_archivo"].lower()
+            # Si al menos 2 palabras clave coinciden con el título de un PDF, es un cambio explícito
+            matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_lower)
+            if matches_nom >= 2:
+                usuario_solicita_nuevo_doc = True
+                break
+
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 2. Puntuación Vectorial
+    # 3. Puntuación Vectorial
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
@@ -270,37 +282,33 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 1.5
 
-    # 3. Puntuación Jerárquica Correcta
+    # 4. Evaluación Jerárquica de Prioridad
     for c in chunks_data:
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
         
-        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower)
-        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower)
+        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
+        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
 
-        # PRIORIDAD 1: Coincidencia explícita del TÍTULO del documento en la pregunta (+20.0)
-        if palabras_especificas and matches_nombre >= 2:
-            chunk_scores[c["chunk_id"]] += 20.0
-        elif matches_nombre == 1:
-            chunk_scores[c["chunk_id"]] += 5.0
+        # REGLA A: Si hay un documento en curso y el usuario NO pidió otro explícitamente -> Anclaje Dominante
+        if doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
+            chunk_scores[c["chunk_id"]] += 35.0
 
-        # PRIORIDAD 2: Números de Actividades solicitados (ej. 140, 150)
+        # REGLA B: Si el usuario solicitó explícitamente un nuevo manual por su título
+        if usuario_solicita_nuevo_doc and matches_nombre >= 2:
+            chunk_scores[c["chunk_id"]] += 25.0
+
+        # REGLA C: Números de Actividades solicitados
         if numeros_buscados:
             matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
             if matches_numeros == len(numeros_buscados):
                 chunk_scores[c["chunk_id"]] += 8.0
-            elif matches_numeros > 0:
-                chunk_scores[c["chunk_id"]] += 3.0
-
-        # PRIORIDAD 3: Anclaje del Historial (+3.0 en lugar de +15.0 para no bloquear búsquedas nuevas)
-        if doc_activo_previo and doc_activo_previo in nombre_lower:
-            chunk_scores[c["chunk_id"]] += 3.0
 
         # Coincidencia en contenido
-        if matches_texto > 0:
+        if matches_texto > 0 and palabras_especificas:
             chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
 
-    # 4. Selección de fragmentos
+    # 5. Selección y ordenamiento de resultados
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
