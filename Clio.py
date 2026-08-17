@@ -215,18 +215,26 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida (Opción B)
 # ------------------------------------------------------------------------------
-def buscar_contexto_relevante(pregunta):
+def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
 
-    query_lower = pregunta.lower()
+    # 1. Unir los últimos mensajes del usuario para conservar el contexto del documento
+    query_contextual = pregunta
+    if historial:
+        mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
+        if mensajes_usuario:
+            # Concatena las últimas 2 preguntas del usuario para no perder nombres/códigos previos
+            query_contextual = " ".join(mensajes_usuario[-2:])
+
+    query_lower = query_contextual.lower()
     
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
         "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
         "cual", "cuál", "como", "cómo", "para", "donde", "dónde", "pasos",
         "actividad", "actividades", "manual", "politica", "política", "empresa", "saber",
-        "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos"
+        "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus"
     }
 
     palabras_especificas = [
@@ -236,8 +244,8 @@ def buscar_contexto_relevante(pregunta):
 
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 1. Puntuación Vectorial (Similitud Semántica)
-    q_vector = embedder.encode([pregunta])
+    # 2. Puntuación Vectorial utilizando el prompt contextualizado
+    q_vector = embedder.encode([query_contextual])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
@@ -246,7 +254,7 @@ def buscar_contexto_relevante(pregunta):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 1.5
 
-    # 2. Puntuación por Coincidencia de Palabras Clave
+    # 3. Puntuación por Coincidencia de Palabras Clave
     if palabras_especificas:
         total_kw = len(palabras_especificas)
         for c in chunks_data:
@@ -266,7 +274,7 @@ def buscar_contexto_relevante(pregunta):
             elif matches_texto > 0:
                 chunk_scores[c["chunk_id"]] += (matches_texto / total_kw) * 1.0
 
-    # 3. Identificar el/los documentos ganadores (Top Docs)
+    # 4. Identificar el/los documentos ganadores
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
@@ -278,20 +286,17 @@ def buscar_contexto_relevante(pregunta):
 
     chunks_finales = []
     
-    # 4. Incluir los mejores fragmentos generales
     for c in chunks_ordenados_por_score:
         if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 8:
             chunks_finales.append(c)
 
-    # 5. INCLUSIÓN FORZADA: Si se solicita inicio/fin o proceso, traer la página "Fin de Procedimiento" del documento ganador
+    # 5. Inclusión forzada de la página de "Fin de Procedimiento" del documento en discusión
     if documentos_principales:
         for c in chunks_data:
             if c["nombre_archivo"] in documentos_principales:
-                # Si el fragmento es el final explícito del manual y no está en la lista, se agrega obligatoriamente
                 if "[TIPO: ACTIVIDAD FINAL" in c["texto"] and c not in chunks_finales:
                     chunks_finales.append(c)
 
-    # Ordenar cronológicamente por archivo y página para mantener coherencia en el prompt
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
     contexto_recuperado = ""
@@ -367,7 +372,10 @@ if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
             try:
                 inicio_tiempo = time.time()
 
-                contexto_filtrado, fuentes = buscar_contexto_relevante(prompt)
+                contexto_filtrado, fuentes = buscar_contexto_relevante(
+    prompt, 
+    historial=st.session_state.messages
+                )
 
                 SYSTEM_PROMPT = f"""
 Eres Clio, el asistente virtual oficial de la empresa. Tu objetivo es explicar procesos, políticas y manuales operativos con máximo detalle, exactitud profesional y rigor.
