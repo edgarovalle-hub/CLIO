@@ -230,25 +230,39 @@ def normalizar_texto(texto):
     texto_nfd = unicodedata.normalize('NFD', texto.lower())
     return "".join(c for c in texto_nfd if unicodedata.category(c) != 'Mn')
 
+def corregir_utf8_corrupto(texto):
+    if not texto:
+        return ""
+    try:
+        return texto.encode('latin-1').decode('utf-8')
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return texto
+
+def normalizar_texto(texto):
+    if not texto:
+        return ""
+    texto = corregir_utf8_corrupto(texto)
+    texto_nfd = unicodedata.normalize('NFD', texto.lower())
+    return "".join(c for c in texto_nfd if unicodedata.category(c) != 'Mn')
+
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
 
     doc_activo_previo = None
 
-    # 1. Recuperar documento activo del historial
+    # 1. Capturar el documento activo del historial (Regex mejorado para espacios y tildes)
     if historial:
         for msg in reversed(historial):
-            if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
-                lineas = msg["content"].split("\n")
-                for l in lineas:
-                    if ".pdf" in l.lower():
-                        match = re.search(r'([\w-]+\.pdf)', l, re.IGNORECASE)
-                        if match:
-                            doc_activo_previo = normalizar_texto(match.group(1))
-                            break
-                if doc_activo_previo:
-                    break
+            if msg["role"] == "assistant":
+                content = msg.get("content", "")
+                if "---FUENTE---" in content or "Referencia:" in content:
+                    # Busca cualquier secuencia que termine en .pdf permitiendo letras, números, espacios, guiones y tildes
+                    matches = re.findall(r'([\w\s\dÁÉÍÓÚáéíóúÑñ.-]+\.pdf)', content, re.IGNORECASE)
+                    if matches:
+                        # Tomamos el primer PDF listado como el activo principal
+                        doc_activo_previo = normalizar_texto(matches[0].strip())
+                        break
 
     pregunta_norm = normalizar_texto(pregunta)
     
@@ -260,7 +274,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
         "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus",
         "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
         "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion",
-        "encargado", "ejecutar", "rol", "departamento"
+        "encargado", "ejecutar", "rol", "departamento", "tiene", "indícame", "indicame"
     }
 
     palabras_especificas = [
@@ -268,10 +282,9 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
-    # Extraer números específicos de la consulta (ej. '120')
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
 
-    # 2. Evaluar cambio de tema explícito
+    # 2. Evaluar si el usuario está solicitando un CAMBIO DE TEMA explícito
     mejor_doc_coincidente = None
     max_matches_titulo = 0
 
@@ -284,13 +297,14 @@ def buscar_contexto_relevante(pregunta, historial=None):
                 mejor_doc_coincidente = nombre_norm
 
     es_cambio_de_tema = False
+    # Solo se considera cambio de tema si coincide con el TÍTULO de OTRO documento distinto
     if mejor_doc_coincidente and (doc_activo_previo is None or mejor_doc_coincidente not in doc_activo_previo):
         if max_matches_titulo >= 1:
             es_cambio_de_tema = True
 
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 3. Busqueda vectorial basica
+    # 3. Puntuación Vectorial
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
@@ -308,29 +322,24 @@ def buscar_contexto_relevante(pregunta, historial=None):
         matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_norm) if palabras_especificas else 0
         matches_texto = sum(1 for kw in palabras_especificas if kw in texto_norm) if palabras_especificas else 0
 
-        # CASO A: Cambio de tema detectado
+        # CASO A: Se solicitó explícitamente otro manual
         if es_cambio_de_tema and matches_nombre > 0:
-            chunk_scores[c["chunk_id"]] += 30.0 + (matches_nombre * 5.0)
+            chunk_scores[c["chunk_id"]] += 50.0 + (matches_nombre * 5.0)
 
-        # CASO B: Documento activo en uso
+        # CASO B: CONTINUIDAD (Sticky Anclaje Fuerte +100.0)
         elif doc_activo_previo and doc_activo_previo in nombre_norm and not es_cambio_de_tema:
-            chunk_scores[c["chunk_id"]] += 25.0
+            chunk_scores[c["chunk_id"]] += 100.0
 
-        # REGLA CLAVE: Si se busca un número de actividad específico (ej. 120), se le da prioridad máxima
+        # Prioridad por números de actividad
         if numeros_buscados:
             for num in numeros_buscados:
-                # Si el número aparece en el texto del chunk
                 if re.search(r'\b' + re.escape(num) + r'\b', texto_norm):
-                    # Si además pertenece al documento activo, sobrepuntuar fuertemente
-                    if doc_activo_previo and doc_activo_previo in nombre_norm:
-                        chunk_scores[c["chunk_id"]] += 50.0
-                    else:
-                        chunk_scores[c["chunk_id"]] += 15.0
+                    chunk_scores[c["chunk_id"]] += 30.0
 
         if matches_texto > 0 and palabras_especificas:
             chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
 
-    # 5. Selección final
+    # 5. Filtrar y ordenar
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
@@ -348,7 +357,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
     fuentes_usadas = set()
     
     for chunk in chunks_ordenados:
-        nombre_limpio = ftfy.fix_text(chunk['nombre_archivo']) if 'ftfy' in globals() else chunk['nombre_archivo']
+        nombre_limpio = corregir_utf8_corrupto(chunk['nombre_archivo'])
         contexto_recuperado += f"\n--- [DOCUMENTO: {nombre_limpio} | PÁGINA {chunk['pagina']}] ---\n"
         contexto_recuperado += chunk['texto'] + "\n"
         fuentes_usadas.add(f"{nombre_limpio} (Pág. {chunk['pagina']})")
