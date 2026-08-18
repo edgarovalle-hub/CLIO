@@ -217,7 +217,7 @@ def inicializar_base_vectorial(root_id):
 vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 
 # ------------------------------------------------------------------------------
-# 4. Búsqueda RAG Híbrida (Opción B)
+# 4. Búsqueda RAG Híbrida
 # ------------------------------------------------------------------------------
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
@@ -276,17 +276,23 @@ def buscar_contexto_relevante(pregunta, historial=None):
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 3. Puntuación Vectorial
+    # --------------------------------------------------------------------------
+    # 3. Puntuación Vectorial (FAISS)
+    # --------------------------------------------------------------------------
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=15)
+    # Aumentamos a k=25 para darle oportunidad a chunks de nuevos temas
+    distances, indices = vector_index.search(q_vector, k=25)
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            chunk_scores[idx] += float(sim) * 1.5
+            # Le damos un peso fuerte y directo a la similitud semántica de FAISS
+            chunk_scores[idx] += float(sim) * 10.0
 
-    # 4. Evaluación Jerárquica de Prioridad
+    # --------------------------------------------------------------------------
+    # 4. Evaluación Jerárquica y Equilibrada
+    # --------------------------------------------------------------------------
     for c in chunks_data:
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
@@ -294,23 +300,26 @@ def buscar_contexto_relevante(pregunta, historial=None):
         matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
         matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
 
-        # REGLA A: Si hay un documento en curso y el usuario NO pidió otro explícitamente -> Anclaje Dominante
-        if doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
-            chunk_scores[c["chunk_id"]] += 35.0
+        # BONUS A: Coincidencia de palabras clave en el NOMBRE del archivo
+        # Si la nueva pregunta nombra palabras del título de UN NUEVO PDF, se impulsa fuertemente
+        if matches_nombre >= 1 and palabras_especificas:
+            chunk_scores[c["chunk_id"]] += (matches_nombre / len(palabras_especificas)) * 8.0
 
-        # REGLA B: Si el usuario solicitó explícitamente un nuevo manual por su título
-        if usuario_solicita_nuevo_doc and matches_nombre >= 2:
-            chunk_scores[c["chunk_id"]] += 25.0
+        # BONUS B: Anclaje al documento previo (MUY SUAVE)
+        # En lugar de +35.0, le damos solo +2.5. FAISS (que ahora aporta hasta ~10.0)
+        # podrá vencer a este anclaje si la nueva pregunta encaja mejor con otro PDF.
+        if doc_activo_previo and doc_activo_previo in nombre_lower:
+            chunk_scores[c["chunk_id"]] += 2.5
 
-        # REGLA C: Números de Actividades solicitados
+        # BONUS C: Números de Actividades / Folios solicitados
         if numeros_buscados:
             matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
             if matches_numeros == len(numeros_buscados):
-                chunk_scores[c["chunk_id"]] += 8.0
+                chunk_scores[c["chunk_id"]] += 5.0
 
-        # Coincidencia en contenido
+        # BONUS D: Coincidencia en el cuerpo del texto
         if matches_texto > 0 and palabras_especificas:
-            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
+            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 3.0
 
     # 5. Selección y ordenamiento de resultados
     chunks_ordenados_por_score = sorted(
@@ -442,6 +451,11 @@ REGLAS DE RESPUESTA UNIVERSALES:
      ---FUENTE---
      * Nombre_Documento.pdf (Pág. X)
 6. Para saludos o preguntas generales de cortesía, responde brevemente sin usar `---FUENTE---`.
+7. CAMBIO DE TEMA Y TRANSICIONES:
+   - Basándote EXCLUSIVAMENTE en los FRAGMENTOS RECUPERADOS actuales, responde al tema que el usuario solicita ahora.
+   - Si la consulta del usuario cambia a un procedimiento o documento distinto al abordado en mensajes anteriores del chat, IGNORA el contexto del documento anterior. 
+   - No intentes vincular ni comparar el nuevo procedimiento con el previo a menos que el usuario lo pida explícitamente.
+
 """
 
                 chat_history = []
