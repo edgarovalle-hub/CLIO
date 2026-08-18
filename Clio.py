@@ -225,6 +225,9 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida con Mantenimiento de Hilo y Cambio de Tema
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 4. Búsqueda RAG Híbrida (Robusta ante Preguntas Numericas y de Seguimiento)
+# ------------------------------------------------------------------------------
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
@@ -247,6 +250,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
 
     query_lower = pregunta.lower()
     
+    # Añadimos palabras relativas a preguntas de formato ("rol", "departamento", "actividad", etc.) a la lista de ignoradas
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
         "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
@@ -255,72 +259,74 @@ def buscar_contexto_relevante(pregunta, historial=None):
         "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus",
         "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
         "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion",
-        "identifica", "puntos", "cada", "tipo", "exclusivo", "evalua", "opciones", "secuencial", "paralelo"
+        "identifica", "puntos", "cada", "tipo", "exclusivo", "evalua", "opciones", "secuencial", "paralelo",
+        "rol", "roles", "departamento", "encargado", "encargada", "ejecutar", "ejecuta", "realiza",
+        "responsable", "quien", "quién", "id", "numero", "número"
     }
 
-    palabras_especificas = [
+    # Palabras que verdaderamente aportan TEMA O MATERIA A LA PREGUNTA
+    palabras_tematicas = [
         w for w in re.findall(r'\w+', query_lower) 
-        if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
+        if len(w) > 2 and w not in STOPWORDS_OPERATIVAS and not w.isdigit()
     ]
 
-    # 2. ENRIQUECIMIENTO DE LA BÚSQUEDA (Mantenimiento de Hilo)
-    # Si la pregunta tiene pocas palabras sustantivas (ej: "¿quién autoriza?", "¿cuál es el paso 3?")
-    # y hay un doc activo previo, construimos una query enriquecida para FAISS.
+    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
+
+    # DETECTOR DE PREGUNTA DE SEGUIMIENTO:
+    # Si no hay palabras temáticas explícitas (ej: solo preguntan por un rol, ID o paso)
+    # O si solo buscan un número de actividad y tenemos un doc previo activo.
+    es_pregunta_seguimiento = False
+    if doc_activo_previo:
+        if len(palabras_tematicas) == 0 or (numeros_buscados and len(palabras_tematicas) <= 2):
+            es_pregunta_seguimiento = True
+
+    # 2. ENRIQUECIMIENTO DE LA CONSULTA
     query_para_vector = pregunta
-    if doc_activo_previo and len(palabras_especificas) <= 3:
-        # Convertimos el nombre del archivo en un término de búsqueda limpio (ej: "proc_viaticos.pdf" -> "proc viaticos")
+    if es_pregunta_seguimiento and doc_activo_previo:
         nombre_limpio = doc_activo_previo.replace(".pdf", "").replace("_", " ").replace("-", " ")
         query_para_vector = f"{pregunta} {nombre_limpio}"
 
-    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 3. Búsqueda Vectorial con la Query Enriquecida
+    # 3. Búsqueda Vectorial Semántica
     q_vector = embedder.encode([query_para_vector])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=20)
-    
-    similitud_con_doc_previo = 0.0
+    distances, indices = vector_index.search(q_vector, k=25)
     
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
             score_vectorial = float(sim) * 10.0
             chunk_scores[idx] += score_vectorial
-            
-            if doc_activo_previo and doc_activo_previo in chunks_data[idx]["nombre_archivo"].lower():
-                similitud_con_doc_previo = max(similitud_con_doc_previo, float(sim))
 
     # 4. Asignación Racional de Bonos
-    # Si la pregunta era de seguimiento (pocos términos) O la similitud semántica con el doc activo es alta,
-    # concedemos un bono de anclaje para asegurar que los chunks del documento activo se mantengan arriba.
-    es_pregunta_seguimiento = doc_activo_previo is not None and (len(palabras_especificas) <= 3 or similitud_con_doc_previo > 0.35)
-
     for c in chunks_data:
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
         
-        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
-        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
+        matches_nombre = sum(1 for kw in palabras_tematicas if kw in nombre_lower) if palabras_tematicas else 0
+        matches_texto = sum(1 for kw in palabras_tematicas if kw in texto_lower) if palabras_tematicas else 0
 
-        # BONUS por mención explícita del título de un nuevo PDF
+        # BONUS 1: Si menciona explícitamente palabras del título de UN PDF
         if matches_nombre > 0:
-            chunk_scores[c["chunk_id"]] += matches_nombre * 5.0
+            chunk_scores[c["chunk_id"]] += matches_nombre * 6.0
 
-        # BONUS por Continuidad de Hilo
+        # BONUS 2: Si es pregunta de seguimiento, el PDF ACTIVO PREVIO recibe un impulso determinante
         if es_pregunta_seguimiento and doc_activo_previo in nombre_lower:
-            chunk_scores[c["chunk_id"]] += 8.0
+            chunk_scores[c["chunk_id"]] += 20.0
 
-        # BONUS por Número de Actividad coincidente (ej: "paso 2", "actividad 5")
+        # BONUS 3: Coincidencia por número de actividad SOLO si está en contexto o el PDF es relevante
         if numeros_buscados:
-            matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
+            matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower)
             if matches_numeros == len(numeros_buscados):
-                chunk_scores[c["chunk_id"]] += 6.0
+                # Si es el doc activo o no hay palabras temáticas opuestas, se da un bono moderado
+                if not es_pregunta_seguimiento or doc_activo_previo in nombre_lower:
+                    chunk_scores[c["chunk_id"]] += 4.0
 
-        # BONUS por coincidencia en texto
-        if matches_texto > 0 and palabras_especificas:
-            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
+        # BONUS 4: Coincidencia de texto
+        if matches_texto > 0 and palabras_tematicas:
+            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_tematicas)) * 2.0
 
     # 5. Ordenamiento y Selección de Chunks
     chunks_ordenados_por_score = sorted(
@@ -334,7 +340,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if chunk_scores[c["chunk_id"]] > 1.0 and len(chunks_finales) < 10:
             chunks_finales.append(c)
 
-    # Inclusión de fragmentos de conclusión/fin de procedimiento si detectamos el documento principal
+    # Asegurar fragmento de conclusión si aplica
     documentos_principales = set(c["nombre_archivo"] for c in chunks_finales[:2])
     if documentos_principales:
         for c in chunks_data:
