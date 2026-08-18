@@ -241,7 +241,6 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
         return "", [], None
 
     pregunta_norm = normalizar_texto(pregunta)
-    doc_activo_norm = normalizar_texto(doc_activo_actual) if doc_activo_actual else None
 
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
@@ -256,84 +255,99 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
         "primer", "primer paso", "ultimo", "último", "ultimo paso", "último paso"
     }
 
-    palabras_especificas = [
+    palabras_pregunta = [
         w for w in re.findall(r'\w+', pregunta_norm) 
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
-    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
-
-    # 1. DETECTAR SI SE MENCIONA OTRO DOCUMENTO EXPLÍCITAMENTE
-    menciona_otro_doc = False
-    if palabras_especificas:
-        for c in chunks_data:
-            nombre_norm = normalizar_texto(c["nombre_archivo"])
-            # Si hay palabras en la pregunta que coinciden con el título de UN DOCUMENTO DISTINTO al activo
-            if doc_activo_norm and doc_activo_norm not in nombre_norm:
-                if any(kw in nombre_norm for kw in palabras_especificas):
-                    menciona_otro_doc = True
-                    break
-
-    # 2. ENRIQUECER LA CONSULTA SI LA PREGUNTA ES CONTINUACIÓN
-    if doc_activo_actual and not menciona_otro_doc:
-        query_vectorial = f"{doc_activo_actual} {pregunta}"
-    else:
-        query_vectorial = pregunta
-
-    chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
-
-    # 3. BÚSQUEDA VECTORIAL EN FAISS
-    q_vector = embedder.encode([query_vectorial])
+    # 1. BÚSQUEDA VECTORIAL GLOBAL EN FAISS (Evalúa todo el repositorio)
+    q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
+
+    distances, indices = vector_index.search(q_vector, k=min(25, len(chunks_data)))
     
-    distances, indices = vector_index.search(q_vector, k=30)
+    faiss_scores = {}
+    top_doc_faiss = None
+    max_score_global = -1.0
+
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            chunk_scores[idx] += float(sim) * 10.0
+            score_sim = float(sim)
+            faiss_scores[chunks_data[idx]["chunk_id"]] = score_sim
+            if score_sim > max_score_global:
+                max_score_global = score_sim
+                top_doc_faiss = chunks_data[idx]["nombre_archivo"]
 
-    # 4. REFORZAR DOCUMENTO ACTIVO SI ES UNA PREGUNTA DE SEGUIMIENTO
-    for c in chunks_data:
-        nombre_norm = normalizar_texto(c["nombre_archivo"])
+    # 2. EVALUAR SI EL DOCUMENTO ACTIVO CONTIENE LA RESPUESTA O SE DEBE CAMBIAR DE TEMA
+    doc_activo_norm = normalizar_texto(doc_activo_actual) if doc_activo_actual else None
+    
+    # Calcular el mejor score dentro del documento activo
+    max_score_doc_activo = 0.0
+    if doc_activo_norm:
+        for c in chunks_data:
+            if doc_activo_norm in normalizar_texto(c["nombre_archivo"]):
+                score_chunk = faiss_scores.get(c["chunk_id"], 0.0)
+                if score_chunk > max_score_doc_activo:
+                    max_score_doc_activo = score_chunk
+
+    # REGLA DE DESBLOQUEO:
+    # Si no hay documento activo, o si FAISS encuentra otro PDF con mejor coincidencia que el documento activo,
+    # se cambia al nuevo documento.
+    es_cambio_de_tema = False
+    if doc_activo_actual:
+        if top_doc_faiss and normalizar_texto(top_doc_faiss) != doc_activo_norm:
+            # Si el nuevo documento supera al activo por un margen claro, soltamos el ancla
+            if max_score_global > (max_score_doc_activo + 0.05):
+                es_cambio_de_tema = True
+
+    # 3. SELECCIÓN DE CANON DE BÚSQUEDA
+    if doc_activo_actual and not es_cambio_de_tema:
+        # Pregunta de seguimiento sobre el mismo manual
+        chunks_candidatos = [c for c in chunks_data if doc_activo_norm in normalizar_texto(c["nombre_archivo"])]
+    else:
+        # Cambio de tema o primera pregunta: Usamos el nuevo documento ganador o todo el repositorio
+        if top_doc_faiss:
+            top_doc_norm = normalizar_texto(top_doc_faiss)
+            chunks_candidatos = [c for c in chunks_data if top_doc_norm in normalizar_texto(c["nombre_archivo"])]
+        else:
+            chunks_candidatos = chunks_data
+
+    # 4. ORDENAR Y SELECCIONAR RESULTADOS FINAL
+    chunk_scores = {}
+    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
+
+    for c in chunks_candidatos:
+        cid = c["chunk_id"]
+        score = faiss_scores.get(cid, 0.0) * 10.0
         texto_norm = normalizar_texto(c["texto"])
-        
-        # Si estamos en continuidad del mismo documento, priorizar sus fragmentos
-        if doc_activo_norm and doc_activo_norm in nombre_norm and not menciona_otro_doc:
-            chunk_scores[c["chunk_id"]] += 20.0
 
-        # Coincidencias de palabras clave
-        if palabras_especificas:
-            matches_texto = sum(1 for kw in palabras_especificas if kw in texto_norm)
-            if matches_texto > 0:
-                chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 5.0
+        if palabras_pregunta:
+            matches = sum(1 for kw in palabras_pregunta if kw in texto_norm)
+            score += (matches / len(palabras_pregunta)) * 5.0
 
-        # Coincidencias de números de actividad
         if numeros_buscados:
             for num in numeros_buscados:
                 if re.search(r'\b' + re.escape(num) + r'\b', texto_norm):
-                    chunk_scores[c["chunk_id"]] += 15.0
+                    score += 15.0
 
-    # 5. ORDENAR Y SELECCIONAR RESULTADOS
-    chunks_ordenados_por_score = sorted(
-        chunks_data, 
-        key=lambda c: chunk_scores[c["chunk_id"]], 
+        chunk_scores[cid] = score
+
+    chunks_ordenados = sorted(
+        chunks_candidatos, 
+        key=lambda c: chunk_scores.get(c["chunk_id"], 0.0), 
         reverse=True
     )
 
-    chunks_finales = []
-    for c in chunks_ordenados_por_score:
-        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
-            chunks_finales.append(c)
-
-    # Definir nuevo documento activo
+    chunks_finales = chunks_ordenados[:10]
     nuevo_doc_activo = chunks_finales[0]["nombre_archivo"] if chunks_finales else doc_activo_actual
 
-    chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
+    chunks_ordenados_lectura = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
     contexto_recuperado = ""
     fuentes_usadas = set()
     
-    for chunk in chunks_ordenados:
+    for chunk in chunks_ordenados_lectura:
         nombre_limpio = corregir_utf8_corrupto(chunk['nombre_archivo'])
         contexto_recuperado += f"\n--- [DOCUMENTO: {nombre_limpio} | PÁGINA {chunk['pagina']}] ---\n"
         contexto_recuperado += chunk['texto'] + "\n"
