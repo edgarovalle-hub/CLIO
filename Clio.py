@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------------
-# backup las 10 preguntas de fichas no redimibles están correctas con hilo y logica
+# Clio - Asistente Virtual (Versión Universal con Detección Semántica de Cambio de Tema)
 # ---------------------------------------------------------------------------------
 
 import os
@@ -33,7 +33,6 @@ st.caption("Asistente virtual especializado en procesos y manuales operativos de
 
 @st.cache_resource
 def get_gemini_client():
-    # Soporta tanto GEMINI_API_KEY como GEMINI_FREE_KEY o variables de entorno
     api_key = (
         st.secrets.get("GEMINI_API_KEY")
         or st.secrets.get("GEMINI_FREE_KEY")
@@ -183,14 +182,12 @@ def crear_chunks_inteligentes(paginas_doc):
 
 @st.cache_resource
 def inicializar_base_vectorial(root_id):
-    # Cargar los índices si ya fueron generados
     if os.path.exists(INDEX_FILE) and os.path.exists(CHUNKS_FILE):
         index = faiss.read_index(INDEX_FILE)
         with open(CHUNKS_FILE, "rb") as f:
             chunks = pickle.load(f)
         return index, chunks
 
-    # Generación completa si no existen los binarios
     paginas = extraer_paginas_pdf(root_id)
     if not paginas:
         return None, []
@@ -213,11 +210,10 @@ def inicializar_base_vectorial(root_id):
     
     return index, chunks
 
-# Carga inicial
 vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 
 # ------------------------------------------------------------------------------
-# 4. Búsqueda RAG Híbrida (Detección de Cambio de Tema Corregida)
+# 4. Búsqueda RAG Híbrida Adaptativa (Universal para Cambio de Tema)
 # ------------------------------------------------------------------------------
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
@@ -225,7 +221,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
 
     doc_activo_previo = None
 
-    # 1. Identificar si ya existe un documento activo en la respuesta previa de la sesión
+    # 1. Identificar si ya existe un documento activo en la respuesta previa
     if historial:
         for msg in reversed(historial):
             if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
@@ -239,60 +235,67 @@ def buscar_contexto_relevante(pregunta, historial=None):
                 if doc_activo_previo:
                     break
 
-    # 2. Búsqueda Vectorial Pura (Calcula la afinidad real contra todo el catálogo)
+    # 2. Búsqueda Vectorial Pura para evaluar la semántica real de la pregunta
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=20)
-
-    # Identificar el documento dominante devuelto por la búsqueda semántica de FAISS
+    distances, indices = vector_index.search(q_vector, k=15)
+    
+    # Evaluar si el vector principal apunta a un nuevo documento
     top_doc_encontrado = None
+    max_simil = 0.0
     if len(indices[0]) > 0 and indices[0][0] < len(chunks_data):
+        max_simil = float(distances[0][0])
         top_doc_encontrado = chunks_data[indices[0][0]]["nombre_archivo"].lower()
 
-    # Determinar si la pregunta pertenece al mismo documento activo o es un tema diferente
-    mismo_tema = False
-    if doc_activo_previo and top_doc_encontrado:
-        if doc_activo_previo in top_doc_encontrado or top_doc_encontrado in doc_activo_previo:
-            mismo_tema = True
+    # Detección Universal de Cambio de Tema: Si la similitud del mejor candidato global es sólida 
+    # y proviene de un PDF distinto al anterior, declaramos cambio de tema automáticamente.
+    es_cambio_de_tema = False
+    if doc_activo_previo and top_doc_encontrado and (top_doc_encontrado != doc_activo_previo):
+        if max_simil > 0.35:  # Umbral de confianza semántica
+            es_cambio_de_tema = True
 
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # Sumar directamente la puntuación de similitud calculada por FAISS a cada chunk
+    # Asignar puntajes vectoriales
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 10.0
 
-    # 3. Puntuación Jerárquica y Bonificaciones
+    # Puntuación Jerárquica
+    query_lower = pregunta.lower()
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
 
     for c in chunks_data:
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
 
-        # Solo aplicamos impulso al documento anterior si la nueva pregunta pertenece explícitamente al mismo tema
-        if mismo_tema and (doc_activo_previo in nombre_lower):
-            chunk_scores[c["chunk_id"]] += 1.5
+        # Si NO hay cambio de tema, otorgamos un impulso moderado al documento anterior
+        if doc_activo_previo and (doc_activo_previo in nombre_lower) and not es_cambio_de_tema:
+            chunk_scores[c["chunk_id"]] += 3.0
 
-        # Bonificación si coincide con los números de actividad consultados
+        # Coincidencia de números de actividad
         if numeros_buscados:
             matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
             if matches_numeros == len(numeros_buscados):
-                chunk_scores[c["chunk_id"]] += 3.0
+                chunk_scores[c["chunk_id"]] += 5.0
 
-    # 4. Selección de los fragmentos con mayor puntuación
+    # 3. Selección y ordenamiento
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
         reverse=True
     )
     
-    # Tomar los 10 mejores fragmentos encontrados
-    chunks_finales = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.0][:10]
+    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 1.0]
+    documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
 
-    # Asegurar incluir las actividades finales/conclusiones del documento principal detectado
-    documentos_principales = set(c["nombre_archivo"] for c in chunks_finales[:3])
+    chunks_finales = []
+    for c in chunks_ordenados_por_score:
+        if chunk_scores[c["chunk_id"]] > 0.5 and len(chunks_finales) < 10:
+            chunks_finales.append(c)
+
     if documentos_principales:
         for c in chunks_data:
             if c["nombre_archivo"] in documentos_principales:
@@ -362,7 +365,7 @@ for idx, message in enumerate(st.session_state.messages):
             st.markdown(message["content"])
 
 # ------------------------------------------------------------------------------
-# 6. Procesamiento de Preguntas y Medición de Tiempo
+# 6. Procesamiento de Preguntas (Exactamente 1 llamada por pregunta)
 # ------------------------------------------------------------------------------
 if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
     
@@ -380,14 +383,13 @@ if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
                     historial=st.session_state.messages
                 )
 
-                # Usamos sustitución limpia con .format() para evitar conflictos con las f-strings
                 SYSTEM_PROMPT = """
 Eres Clio, el asistente virtual oficial de la empresa. Tu objetivo es explicar procesos, políticas y manuales operativos con máximo detalle, exactitud profesional y rigor.
 
 === INSTRUCCIONES DE ATENCIÓN Y NAVEGACIÓN ===
 
 1. FLEXIBILIDAD DE CONTEXTO:
-   - El usuario puede cambiar de tema, procedimiento o documento en cualquier momento de la conversación sin necesidad de especificar el nombre exacto del archivo.
+   - El usuario puede cambiar de tema, procedimiento o documento en cualquier momento de la conversación sin necesidad de indicar el nombre exacto del archivo.
    - NUNCA asumas que la consulta actual debe continuar limitada al documento o procedimiento mencionado en los mensajes anteriores.
 
 2. EVALUACIÓN DE INFORMACIÓN DISPONIBLE:
@@ -456,7 +458,6 @@ REGLAS DE RESPUESTA UNIVERSALES:
                     temperature=0.0,
                 )
 
-                # LÓGICA DE REINTENTOS AUTOMÁTICOS (MÁXIMO 3 INTENTOS)
                 max_reintentos = 3
                 response = None
 
@@ -467,13 +468,13 @@ REGLAS DE RESPUESTA UNIVERSALES:
                             contents=chat_history,
                             config=gemini_config
                         )
-                        break # Si tuvo éxito, sale del bucle de reintentos
+                        break
                     except APIError as e:
                         if ("503" in str(e) or "UNAVAILABLE" in str(e)) and intento < max_reintentos - 1:
-                            tiempo_espera = (intento + 1) * 2  # Espera 2s en el 1er fallo, 4s en el 2do fallo
+                            tiempo_espera = (intento + 1) * 2
                             time.sleep(tiempo_espera)
                             continue
-                        raise e # Si es otro error o ya superó los 3 reintentos, lanza la excepción
+                        raise e
 
                 tiempo_total = time.time() - inicio_tiempo
 
@@ -487,9 +488,9 @@ REGLAS DE RESPUESTA UNIVERSALES:
 
             except APIError as e:
                 if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    st.error("☁️ **Servidores de Google saturados (Error 503).** Los servidores de Gemini tienen alta demanda en este momento. Por favor, reintenta tu pregunta en unos segundos.")
+                    st.error("☁️ **Servidores de Google saturados (Error 503).** Reintenta tu pregunta en unos segundos.")
                 elif "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    st.error("⏳ **Límite de solicitudes alcanzado (Error 429).** Has superado la cuota permitida por minuto. Por favor espera un momento.")
+                    st.error("⏳ **Límite de solicitudes alcanzado (Error 429).** Reintenta en un momento.")
                 else:
                     st.error(f"⚠️ Ocurrió un error en la API de Gemini: {e}")
             except Exception as e:
