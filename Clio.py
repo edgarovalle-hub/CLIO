@@ -19,7 +19,7 @@ from google.genai.errors import APIError
 # 1. Configuración General
 # ------------------------------------------------------------------------------
 ROOT_FOLDER_ID = "1EOtPbfr9tH0lhvB4KK9JRb3MA_QjJUzp"
-MODEL_NAME = "gemini-3.5-flash-lite" 
+MODEL_NAME = "gemini-2.5-flash" 
 INDEX_FILE = "faiss_index.bin"
 CHUNKS_FILE = "chunks_data.pkl"
 
@@ -215,115 +215,29 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida (Opción B)
 # ------------------------------------------------------------------------------
-def buscar_contexto_relevante(pregunta, historial=None):
+def buscar_contexto_relevante(pregunta):
     if not chunks_data or not vector_index:
         return "", []
 
-    query_contextual = pregunta
-    doc_activo_previo = None
-
-    # 1. Detectar si ya había un documento activo en el historial reciente
-    if historial:
-        mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
-        if mensajes_usuario:
-            query_contextual = " ".join(mensajes_usuario[-2:])
-        
-        # Buscar el nombre del documento en las fuentes de la última respuesta del asistente
-        for msg in reversed(historial):
-            if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
-                # Extrae el nombre del archivo de las fuentes citadas
-                lineas = msg["content"].split("\n")
-                for l in lineas:
-                    if ".pdf" in l.lower():
-                        match = re.search(r'([\w-]+\.pdf)', l, re.IGNORECASE)
-                        if match:
-                            doc_activo_previo = match.group(1).lower()
-                            break
-                if doc_activo_previo:
-                    break
-
-    query_lower = query_contextual.lower()
-    
-    STOPWORDS_OPERATIVAS = {
-        "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
-        "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
-        "cual", "cuál", "como", "cómo", "para", "donde", "dónde", "pasos",
-        "actividad", "actividades", "manual", "politica", "política", "empresa", "saber",
-        "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus",
-        "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
-        "conector", "pasa", "directo", "otro"
-    }
-
-    palabras_especificas = [
-        w for w in re.findall(r'\w+', query_lower) 
-        if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
-    ]
-
-    numeros_buscados = set(re.findall(r'\b\d+\b', query_contextual))
-    chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
-
-    # 2. Puntuación Vectorial
-    q_vector = embedder.encode([query_contextual])
+    # 1. Búsqueda Vectorial por Similitud Coseno
+    q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=15)
-    for sim, idx in zip(distances[0], indices[0]):
-        if idx < len(chunks_data):
-            chunk_scores[idx] += float(sim) * 1.5
-
-    # 3. Puntuación por Palabras, Números y ANCLAJE DE DOCUMENTO
-    for c in chunks_data:
-        nombre_lower = c["nombre_archivo"].lower()
-        texto_lower = c["texto"].lower()
-        
-        # ANCLAJE DE CONTINUIDAD: Si el fragmento pertenece al documento que ya se estaba discutiendo
-        if doc_activo_previo and doc_activo_previo in nombre_lower:
-            chunk_scores[c["chunk_id"]] += 15.0  # Prioridad absoluta al documento en curso
-
-        # Coincidencia de números de actividad (ej. 140, 150)
-        if numeros_buscados:
-            matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
-            if matches_numeros == len(numeros_buscados):
-                chunk_scores[c["chunk_id"]] += 8.0
-            elif matches_numeros > 0:
-                chunk_scores[c["chunk_id"]] += 4.0
-
-        # Coincidencia de palabras clave
-        if palabras_especificas:
-            matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower)
-            matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower)
-            
-            if matches_nombre == len(palabras_especificas):
-                chunk_scores[c["chunk_id"]] += 5.0
-            elif matches_nombre > 0:
-                chunk_scores[c["chunk_id"]] += 2.0
-
-            if matches_texto == len(palabras_especificas):
-                chunk_scores[c["chunk_id"]] += 3.0
-
-    # 4. Ordenar y seleccionar los mejores fragmentos
-    chunks_ordenados_por_score = sorted(
-        chunks_data, 
-        key=lambda c: chunk_scores[c["chunk_id"]], 
-        reverse=True
-    )
+    distances, indices = vector_index.search(q_vector, k=6)
     
-    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.5]
-    documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
+    chunks_recuperados = []
+    for idx in indices[0]:
+        if idx < len(chunks_data):
+            chunks_recuperados.append(chunks_data[idx])
 
-    chunks_finales = []
-    for c in chunks_ordenados_por_score:
-        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
-            chunks_finales.append(c)
+    # 2. Inclusión directa de Matrices de Actividades
+    for chunk in chunks_data:
+        if chunk.get("es_matriz", False) and chunk not in chunks_recuperados:
+            chunks_recuperados.append(chunk)
 
-    if documentos_principales:
-        for c in chunks_data:
-            if c["nombre_archivo"] in documentos_principales:
-                if "[TIPO: ACTIVIDAD FINAL" in c["texto"] and c not in chunks_finales:
-                    chunks_finales.append(c)
-
-    chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
+    # Ordenar cronológicamente por archivo y página
+    chunks_ordenados = sorted(chunks_recuperados, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
     contexto_recuperado = ""
     fuentes_usadas = set()
@@ -334,6 +248,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
         fuentes_usadas.add(f"{chunk['nombre_archivo']} (Pág. {chunk['pagina']})")
             
     return contexto_recuperado, sorted(list(fuentes_usadas))
+
 # ------------------------------------------------------------------------------
 # 5. Renderizado e Interfaz de Usuario
 # ------------------------------------------------------------------------------
@@ -407,7 +322,7 @@ FRAGMENTOS RECUPERADOS DE LOS MANUALES OFICIALES:
 \"\"\"
 {contexto_filtrado if contexto_filtrado else "No se encontraron fragmentos relevantes."}
 \"\"\"
-Instrucción de extracción estricta: Responde ÚNICAMENTE con los datos explícitos del texto. Queda estrictamente prohibido suponer, deducir o inventar cargos, puestos o actividades que no aparezcan literalmente escritos en el documento.
+
 REGLAS DE RESPUESTA UNIVERSALES:
 1. EXPLICACIÓN COMPLETA DE PROCESOS:
    - Al explicar el inicio, detonador o conclusión de cualquier proceso, NO te limites a los resúmenes ejecutivos de carátula si la documentación contiene la matriz detallada de actividades.
