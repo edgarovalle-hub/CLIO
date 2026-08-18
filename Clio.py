@@ -420,7 +420,12 @@ FRAGMENTOS RECUPERADOS DE LOS MANUALES OFICIALES:
 \"\"\"
 {contexto_filtrado if contexto_filtrado else "No se encontraron fragmentos relevantes."}
 \"\"\"
-
+REGLAS EXTRICTAS DE CONTEXTO:
+- Solo responde basándote en la información proporcionada en los fragmentos recuperados.
+- No inventes ni proporciones información que no esté presente en los documentos oficiales.
+- verifica siempre si el usuario se refiere a un documento específico y prioriza la información de ese documento.
+- verifica si el usuario cambia el tema con respecto al historial reciente y ajusta tu respuesta a la nueva solicitud.
+- si el usuario cambia de tema, ignora la información de documentos previos y enfócate en los fragmentos más recientes.
 REGLAS DE RESPUESTA UNIVERSALES:
 1. EXPLICACIÓN COMPLETA DE PROCESOS:
    - Al explicar el inicio, detonador o conclusión de cualquier proceso, NO te limites a los resúmenes ejecutivos de carátula si la documentación contiene la matriz detallada de actividades.
