@@ -219,19 +219,17 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida (Opción B)
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 4. Búsqueda RAG Híbrida (Corregida para Cambio de Tema)
+# ------------------------------------------------------------------------------
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
 
-    query_contextual = pregunta
     doc_activo_previo = None
 
-    # 1. Identificar si ya existe un documento activo en el historial reciente
+    # 1. Identificar el documento que venía activo en el historial
     if historial:
-        mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
-        if mensajes_usuario:
-            query_contextual = " ".join(mensajes_usuario[-2:])
-        
         for msg in reversed(historial):
             if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
                 lineas = msg["content"].split("\n")
@@ -262,31 +260,33 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
-    # 2. Verificar si la pregunta del usuario menciona explícitamente UN NUEVO MANUAL
-    usuario_solicita_nuevo_doc = False
-    if palabras_especificas:
-        for c in chunks_data:
-            nombre_lower = c["nombre_archivo"].lower()
-            # Si al menos 2 palabras clave coinciden con el título de un PDF, es un cambio explícito
-            matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_lower)
-            if matches_nom >= 2:
-                usuario_solicita_nuevo_doc = True
-                break
-
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 3. Puntuación Vectorial
+    # 2. Búsqueda Vectorial Semántica (La principal fuente de verdad)
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=15)
+    # Buscamos los 20 chunks más cercanos en todo el universo de 397 PDFs
+    distances, indices = vector_index.search(q_vector, k=20)
+    
+    similitud_con_doc_previo = 0.0
+    
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            chunk_scores[idx] += float(sim) * 1.5
+            score_vectorial = float(sim) * 10.0  # Incrementamos la relevancia semántica
+            chunk_scores[idx] += score_vectorial
+            
+            # Verificamos si los resultados principales de la nueva pregunta pertenecen al PDF anterior
+            if doc_activo_previo and doc_activo_previo in chunks_data[idx]["nombre_archivo"].lower():
+                similitud_con_doc_previo = max(similitud_con_doc_previo, float(sim))
 
-    # 4. Evaluación Jerárquica de Prioridad
+    # 3. Evaluación de Anclaje Racional
+    # Solo otorgamos un pequeño bono al documento previo SI la nueva pregunta sigue teniendo coherencia con él
+    # (por ejemplo, si la similitud vectorial con ese doc previo es mayor a 0.40)
+    ACOMPANAMIENTO_CONTEXTUAL = doc_activo_previo is not None and similitud_con_doc_previo > 0.40
+
     for c in chunks_data:
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
@@ -294,39 +294,39 @@ def buscar_contexto_relevante(pregunta, historial=None):
         matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
         matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
 
-        # REGLA A: Si hay un documento en curso y el usuario NO pidió otro explícitamente -> Anclaje Dominante
-        if doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
-            chunk_scores[c["chunk_id"]] += 35.0
+        # BONUS 1: Si el usuario menciona explícitamente palabras del título de UN PDF
+        if matches_nombre > 0:
+            chunk_scores[c["chunk_id"]] += matches_nombre * 4.0
 
-        # REGLA B: Si el usuario solicitó explícitamente un nuevo manual por su título
-        if usuario_solicita_nuevo_doc and matches_nombre >= 2:
-            chunk_scores[c["chunk_id"]] += 25.0
+        # BONUS 2: Continuidad de conversación ligera (máximo +3.0 en lugar de +35.0)
+        if ACOMPANAMIENTO_CONTEXTUAL and doc_activo_previo in nombre_lower:
+            chunk_scores[c["chunk_id"]] += 3.0
 
-        # REGLA C: Números de Actividades solicitados
+        # BONUS 3: Coincidencia por número de actividad
         if numeros_buscados:
             matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
             if matches_numeros == len(numeros_buscados):
-                chunk_scores[c["chunk_id"]] += 8.0
+                chunk_scores[c["chunk_id"]] += 5.0
 
-        # Coincidencia en contenido
+        # BONUS 4: Coincidencia exacta de palabras clave en texto
         if matches_texto > 0 and palabras_especificas:
             chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
 
-    # 5. Selección y ordenamiento de resultados
+    # 4. Ordenamiento y Selección
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
         reverse=True
     )
     
-    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.5]
-    documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
-
+    # Tomamos solo chunks con un score significativo
     chunks_finales = []
     for c in chunks_ordenados_por_score:
-        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
+        if chunk_scores[c["chunk_id"]] > 1.5 and len(chunks_finales) < 10:
             chunks_finales.append(c)
 
+    # Si hay documentos principales detectados, asegurar incluir fragmentos de conclusión/cierre
+    documentos_principales = set(c["nombre_archivo"] for c in chunks_finales[:2])
     if documentos_principales:
         for c in chunks_data:
             if c["nombre_archivo"] in documentos_principales:
