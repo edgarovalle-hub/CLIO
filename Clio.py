@@ -286,7 +286,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 1.5
 
-    # 4. Evaluación Jerárquica de Prioridad
+# 4. Evaluación Jerárquica de Prioridad
     for c in chunks_data:
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
@@ -294,24 +294,24 @@ def buscar_contexto_relevante(pregunta, historial=None):
         matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
         matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
 
-        # REGLA A: Si hay un documento en curso y el usuario NO pidió otro explícitamente -> Anclaje Dominante
-        if doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
-            chunk_scores[c["chunk_id"]] += 35.0
+        # REGLA B CORREGIDA: Si detecta palabras clave del título de un nuevo PDF, le da prioridad absoluta (+50)
+        if matches_nombre >= 1 and usuario_solicita_nuevo_doc:
+            chunk_scores[c["chunk_id"]] += 50.0
 
-        # REGLA B: Si el usuario solicitó explícitamente un nuevo manual por su título
-        if usuario_solicita_nuevo_doc and matches_nombre >= 2:
-            chunk_scores[c["chunk_id"]] += 25.0
+        # REGLA A CORREGIDA: Solo aplica el anclaje si el usuario NO solicitó un documento distinto
+        elif doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
+            chunk_scores[c["chunk_id"]] += 15.0  # Bajamos de 35 a 15 para no "secuestrar" la búsqueda
 
-        # REGLA C: Números de Actividades solicitados
+        # REGLA C: Coincidencia de números de actividad
         if numeros_buscados:
             matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
             if matches_numeros == len(numeros_buscados):
                 chunk_scores[c["chunk_id"]] += 8.0
 
-        # Coincidencia en contenido
+        # Coincidencia textual general
         if matches_texto > 0 and palabras_especificas:
-            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
-
+            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 5.0
+            
     # 5. Selección y ordenamiento de resultados
     chunks_ordenados_por_score = sorted(
         chunks_data, 
