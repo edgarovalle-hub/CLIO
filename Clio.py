@@ -226,7 +226,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
     query_contextual = pregunta
     doc_activo_previo = None
 
-    # 1. Identificar si existe un documento activo en el historial reciente
+    # 1. Identificar documento previo en el historial
     if historial:
         mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
         if mensajes_usuario:
@@ -244,54 +244,48 @@ def buscar_contexto_relevante(pregunta, historial=None):
                 if doc_activo_previo:
                     break
 
-    # Limpieza mínima de palabras para evaluar coincidencia de títulos
-    STOPWORDS_BASICAS = {"el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "en", "para", "por", "con", "su", "sus", "que", "cual", "cuál", "como", "cómo", "este", "esta"}
+    STOPWORDS_BASICAS = {"el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "en", "para", "por", "con", "su", "sus", "que", "cual", "cuál", "como", "cómo", "este", "esta", "proceso", "procedimiento"}
     palabras_pregunta = [w.lower() for w in re.findall(r'\w+', pregunta) if len(w) > 2 and w.lower() not in STOPWORDS_BASICAS]
 
-    # Detectar si la pregunta es muy corta/ambigua ("¿cuál es su inicio?", "¿quién lo aprueba?")
     es_pregunta_seguimiento = len(palabras_pregunta) <= 2
+    chunk_scores = {i: 0.0 for i in range(len(chunks_data))}
 
-    # 2. Vectorización usando FAISS (Paso principal)
+    # 2. ESCANEO RÁPIDO DE ARCHIVOS (Garantiza encontrar PDFs por su nombre real)
+    # Revisa solo los títulos de los 397 PDFs (súper veloz)
+    if palabras_pregunta:
+        for c in chunks_data:
+            nombre_lower = c["nombre_archivo"].lower()
+            matches_nombre = sum(1 for kw in palabras_pregunta if kw in nombre_lower)
+            # Si coinciden 2 o más palabras con el nombre del PDF (ej: "fichas" y "redimibles")
+            if matches_nombre >= 2:
+                chunk_scores[c["chunk_id"]] += matches_nombre * 10.0
+            elif matches_nombre == 1 and len(palabras_pregunta) <= 3:
+                chunk_scores[c["chunk_id"]] += 5.0
+
+    # 3. VECTORES FAISS (Busca semánticamente el resto de los mejores 30)
     texto_a_vectorizar = query_contextual if (es_pregunta_seguimiento and historial) else pregunta
-    
     q_vector = embedder.encode([texto_a_vectorizar])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    # Traemos los mejores 40 fragmentos semánticos
-    distances, indices = vector_index.search(q_vector, k=40)
-    
-    chunk_scores = {}
-    candidatos_ids = []
-
+    distances, indices = vector_index.search(q_vector, k=30)
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            candidatos_ids.append(idx)
-            # FAISS da la puntuación base pura
-            chunk_scores[idx] = float(sim) * 10.0
+            chunk_scores[idx] += float(sim) * 8.0
 
-    # 3. Boost inteligente por coincidencias directas
-    for idx in candidatos_ids:
-        c = chunks_data[idx]
+    # 4. REGLAS DE ANCLAJE
+    for c in chunks_data:
         nombre_lower = c["nombre_archivo"].lower()
-        texto_lower = c["texto"].lower()
-        
-        # Coincidencias con el nombre del archivo
-        matches_nombre = sum(1 for kw in palabras_pregunta if kw in nombre_lower) if palabras_pregunta else 0
-        if matches_nombre > 0:
-            chunk_scores[idx] += matches_nombre * 4.0
-
-        # Anclaje de conversación previa
         if doc_activo_previo and doc_activo_previo in nombre_lower:
             if es_pregunta_seguimiento:
-                chunk_scores[idx] += 8.0  # Si la pregunta es corta, mantiene el PDF actual
+                chunk_scores[c["chunk_id"]] += 12.0 # Pregunta corta ("¿cuál es su inicio?")
             else:
-                chunk_scores[idx] += 1.5  # Si hace una pregunta completa, da solo un leve empujón
+                chunk_scores[c["chunk_id"]] += 1.5  # Leve prioridad si no hay cambio fuerte
 
-    # 4. Ordenar y seleccionar los mejores 10 fragmentos
-    chunks_candidatos = [chunks_data[idx] for idx in candidatos_ids]
+    # 5. Ordenar únicamente los chunks que obtuvieron puntuación positiva
+    chunks_con_score = [c for c in chunks_data if chunk_scores[c["chunk_id"]] > 0]
     chunks_ordenados_por_score = sorted(
-        chunks_candidatos, 
+        chunks_con_score, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
         reverse=True
     )
