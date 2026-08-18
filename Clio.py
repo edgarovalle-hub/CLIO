@@ -215,29 +215,89 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida (Opción B)
 # ------------------------------------------------------------------------------
-def buscar_contexto_relevante(pregunta):
+def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
 
-    # 1. Búsqueda Vectorial por Similitud Coseno
-    q_vector = embedder.encode([pregunta])
+    # 1. Unir los últimos mensajes del usuario para conservar el contexto del documento
+    query_contextual = pregunta
+    if historial:
+        mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
+        if mensajes_usuario:
+            # Concatena las últimas 2 preguntas del usuario para no perder nombres/códigos previos
+            query_contextual = " ".join(mensajes_usuario[-2:])
+
+    query_lower = query_contextual.lower()
+    
+    STOPWORDS_OPERATIVAS = {
+        "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
+        "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
+        "cual", "cuál", "como", "cómo", "para", "donde", "dónde", "pasos",
+        "actividad", "actividades", "manual", "politica", "política", "empresa", "saber",
+        "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus"
+    }
+
+    palabras_especificas = [
+        w for w in re.findall(r'\w+', query_lower) 
+        if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
+    ]
+
+    chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
+
+    # 2. Puntuación Vectorial utilizando el prompt contextualizado
+    q_vector = embedder.encode([query_contextual])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=6)
-    
-    chunks_recuperados = []
-    for idx in indices[0]:
+    distances, indices = vector_index.search(q_vector, k=15)
+    for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            chunks_recuperados.append(chunks_data[idx])
+            chunk_scores[idx] += float(sim) * 1.5
 
-    # 2. Inclusión directa de Matrices de Actividades
-    for chunk in chunks_data:
-        if chunk.get("es_matriz", False) and chunk not in chunks_recuperados:
-            chunks_recuperados.append(chunk)
+    # 3. Puntuación por Coincidencia de Palabras Clave
+    if palabras_especificas:
+        total_kw = len(palabras_especificas)
+        for c in chunks_data:
+            nombre_lower = c["nombre_archivo"].lower()
+            texto_lower = c["texto"].lower()
+            
+            matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower)
+            matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower)
+            
+            if matches_nombre == total_kw:
+                chunk_scores[c["chunk_id"]] += 5.0
+            elif matches_nombre > 0:
+                chunk_scores[c["chunk_id"]] += (matches_nombre / total_kw) * 2.0
 
-    # Ordenar cronológicamente por archivo y página
-    chunks_ordenados = sorted(chunks_recuperados, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
+            if matches_texto == total_kw:
+                chunk_scores[c["chunk_id"]] += 3.0
+            elif matches_texto > 0:
+                chunk_scores[c["chunk_id"]] += (matches_texto / total_kw) * 1.0
+
+    # 4. Identificar el/los documentos ganadores
+    chunks_ordenados_por_score = sorted(
+        chunks_data, 
+        key=lambda c: chunk_scores[c["chunk_id"]], 
+        reverse=True
+    )
+    
+    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.5]
+    documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
+
+    chunks_finales = []
+    
+    for c in chunks_ordenados_por_score:
+        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 8:
+            chunks_finales.append(c)
+
+    # 5. Inclusión forzada de la página de "Fin de Procedimiento" del documento en discusión
+    if documentos_principales:
+        for c in chunks_data:
+            if c["nombre_archivo"] in documentos_principales:
+                if "[TIPO: ACTIVIDAD FINAL" in c["texto"] and c not in chunks_finales:
+                    chunks_finales.append(c)
+
+    chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
     contexto_recuperado = ""
     fuentes_usadas = set()
@@ -248,7 +308,6 @@ def buscar_contexto_relevante(pregunta):
         fuentes_usadas.add(f"{chunk['nombre_archivo']} (Pág. {chunk['pagina']})")
             
     return contexto_recuperado, sorted(list(fuentes_usadas))
-
 # ------------------------------------------------------------------------------
 # 5. Renderizado e Interfaz de Usuario
 # ------------------------------------------------------------------------------
