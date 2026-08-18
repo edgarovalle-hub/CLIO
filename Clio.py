@@ -230,6 +230,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
     if historial:
         mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
         if mensajes_usuario:
+            # Concatenamos las últimas preguntas para resolver pronombres ("su", "este", "eso")
             query_contextual = " ".join(mensajes_usuario[-2:])
         
         for msg in reversed(historial):
@@ -262,86 +263,67 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
-    # 2. Verificar si la pregunta del usuario menciona explícitamente UN NUEVO MANUAL
-    usuario_solicita_nuevo_doc = False
-    if palabras_especificas:
-        for c in chunks_data:
-            nombre_lower = c["nombre_archivo"].lower()
-            # Si al menos 2 palabras clave coinciden con el título de un PDF, es un cambio explícito
-            matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_lower)
-            if matches_nom >= 2:
-                usuario_solicita_nuevo_doc = True
-                break
+    # Detectar si el usuario está haciendo una pregunta MUY CORTA o de seguimiento (ej: "cuál es su inicio")
+    es_pregunta_seguimiento = len(palabras_especificas) <= 2
 
-    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
-    chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
-
-    # --------------------------------------------------------------------------
-    # 3. Puntuación Vectorial (FAISS)
-    # --------------------------------------------------------------------------
-    q_vector = embedder.encode([pregunta])
+    # 2. Puntuación Vectorial (FAISS) usando la query contextualizada
+    # Usamos query_contextual si es pregunta de seguimiento para no perder el tema
+    texto_a_vectorizar = query_contextual if (es_pregunta_seguimiento and historial) else pregunta
+    
+    q_vector = embedder.encode([texto_a_vectorizar])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    # Aumentamos a k=25 para darle oportunidad a chunks de nuevos temas
-    distances, indices = vector_index.search(q_vector, k=25)
+    # Pedimos los 50 mejores candidatos a FAISS (esto toma 0.001 segundos)
+    k_candidatos = 50
+    distances, indices = vector_index.search(q_vector, k=k_candidatos)
+    
+    chunk_scores = {}
+    candidatos_ids = []
+
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            # Le damos un peso fuerte y directo a la similitud semántica de FAISS
-            chunk_scores[idx] += float(sim) * 10.0
+            candidatos_ids.append(idx)
+            chunk_scores[idx] = float(sim) * 10.0
 
-    # --------------------------------------------------------------------------
-    # 4. Evaluación Jerárquica y Equilibrada
-    # --------------------------------------------------------------------------
-    for c in chunks_data:
+    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
+
+    # 3. Evaluación SOLO sobre los candidatos de FAISS (RÁPIDO)
+    for idx in candidatos_ids:
+        c = chunks_data[idx]
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
         
         matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
         matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
 
-        # BONUS A: Coincidencia de palabras clave en el NOMBRE del archivo
-        # Si la nueva pregunta nombra palabras del título de UN NUEVO PDF, se impulsa fuertemente
-        if matches_nombre >= 1 and palabras_especificas:
-            chunk_scores[c["chunk_id"]] += (matches_nombre / len(palabras_especificas)) * 8.0
-
-        # BONUS B: Anclaje al documento previo (MUY SUAVE)
-        # En lugar de +35.0, le damos solo +2.5. FAISS (que ahora aporta hasta ~10.0)
-        # podrá vencer a este anclaje si la nueva pregunta encaja mejor con otro PDF.
+        # Si es pregunta de seguimiento sin palabras clave nuevas, reforzamos el documento activo
         if doc_activo_previo and doc_activo_previo in nombre_lower:
-            chunk_scores[c["chunk_id"]] += 2.5
+            if es_pregunta_seguimiento:
+                chunk_scores[idx] += 15.0  # Anclaje fuerte si la pregunta es corta/ambigua
+            else:
+                chunk_scores[idx] += 3.0   # Anclaje suave si la pregunta trae palabras propias
 
-        # BONUS C: Números de Actividades / Folios solicitados
+        if matches_nombre >= 1 and palabras_especificas:
+            chunk_scores[idx] += (matches_nombre / len(palabras_especificas)) * 8.0
+
         if numeros_buscados:
             matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
             if matches_numeros == len(numeros_buscados):
-                chunk_scores[c["chunk_id"]] += 5.0
+                chunk_scores[idx] += 5.0
 
-        # BONUS D: Coincidencia en el cuerpo del texto
         if matches_texto > 0 and palabras_especificas:
-            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 3.0
+            chunk_scores[idx] += (matches_texto / len(palabras_especificas)) * 2.0
 
-    # 5. Selección y ordenamiento de resultados
+    # 4. Ordenar únicamente los candidatos filtrados
+    chunks_candidatos = [chunks_data[idx] for idx in candidatos_ids]
     chunks_ordenados_por_score = sorted(
-        chunks_data, 
+        chunks_candidatos, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
         reverse=True
     )
     
-    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.5]
-    documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
-
-    chunks_finales = []
-    for c in chunks_ordenados_por_score:
-        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
-            chunks_finales.append(c)
-
-    if documentos_principales:
-        for c in chunks_data:
-            if c["nombre_archivo"] in documentos_principales:
-                if "[TIPO: ACTIVIDAD FINAL" in c["texto"] and c not in chunks_finales:
-                    chunks_finales.append(c)
-
+    chunks_finales = chunks_ordenados_por_score[:10]
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
     contexto_recuperado = ""
