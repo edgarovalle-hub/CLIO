@@ -382,8 +382,8 @@ if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
                 inicio_tiempo = time.time()
 
                 contexto_filtrado, fuentes = buscar_contexto_relevante(
-                prompt, 
-                historial=st.session_state.messages
+                    prompt, 
+                    historial=st.session_state.messages
                 )
 
                 SYSTEM_PROMPT = f"""
@@ -439,11 +439,24 @@ REGLAS DE RESPUESTA UNIVERSALES:
                     temperature=0.0,
                 )
 
-                response = client.models.generate_content(
-                    model=MODEL_NAME,
-                    contents=chat_history,
-                    config=gemini_config
-                )
+                # LÓGICA DE REINTENTOS AUTOMÁTICOS (MÁXIMO 3 INTENTOS)
+                max_reintentos = 3
+                response = None
+
+                for intento in range(max_reintentos):
+                    try:
+                        response = client.models.generate_content(
+                            model=MODEL_NAME,
+                            contents=chat_history,
+                            config=gemini_config
+                        )
+                        break # Si tuvo éxito, sale del bucle de reintentos
+                    except APIError as e:
+                        if ("503" in str(e) or "UNAVAILABLE" in str(e)) and intento < max_reintentos - 1:
+                            tiempo_espera = (intento + 1) * 2  # Espera 2s en el 1er fallo, 4s en el 2do fallo
+                            time.sleep(tiempo_espera)
+                            continue
+                        raise e # Si es otro error o ya superó los 3 reintentos, lanza la excepción
 
                 tiempo_total = time.time() - inicio_tiempo
 
@@ -456,8 +469,10 @@ REGLAS DE RESPUESTA UNIVERSALES:
                 st.rerun()
 
             except APIError as e:
-                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    st.error("⏳ **Límite de solicitudes alcanzado (Error 429).** Has superado la cuota permitida por Gemini en el plan gratuito. Por favor espera unos minutos o cambia a la modalidad con facturación.")
+                if "503" in str(e) or "UNAVAILABLE" in str(e):
+                    st.error("☁️ **Servidores de Google saturados (Error 503).** Los servidores de Gemini tienen alta demanda en este momento. Por favor, reintenta tu pregunta en unos segundos.")
+                elif "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    st.error("⏳ **Límite de solicitudes alcanzado (Error 429).** Has superado la cuota permitida por minuto. Por favor espera un momento.")
                 else:
                     st.error(f"⚠️ Ocurrió un error en la API de Gemini: {e}")
             except Exception as e:
