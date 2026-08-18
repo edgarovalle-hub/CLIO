@@ -234,13 +234,16 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida (Detección de Cambio de Tema y Fluidez de Hilo)
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 4. Búsqueda RAG Híbrida (Anclaje Estricto de Hilo y Cambio Explícito)
+# ------------------------------------------------------------------------------
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
 
     doc_activo_previo = None
 
-    # 1. Recuperar el documento activo del historial
+    # 1. Recuperar el documento activo de la última interacción
     if historial:
         for msg in reversed(historial):
             if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
@@ -274,42 +277,28 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS and not w.isdigit()
     ]
 
-    # 2. INDICADORES DE CAMBIO DE TEMA POR SINTAXIS
-    # Detecta frases como "del procedimiento X", "en el manual Y", "del proceso Z"
+    # 2. DETECCIÓN ESTRICTA DE CAMBIO DE TEMA
+    # A) Palabras explícitas de transición (ej: "del procedimiento X", "en el manual Y", "sobre el proceso Z")
     patron_cambio = r'(?:del|en el|sobre el|para el)\s+(?:procedimiento|proceso|manual|documento)\s+([a-záéíóúñ0-9\s]{3,30})'
-    mencion_explicita_proceso = re.search(patron_cambio, query_lower)
-    
-    usuario_solicita_nuevo_doc = False
-    
-    # A) Verificación por títulos de archivos
+    mencion_estructura = re.search(patron_cambio, query_lower) is not None
+
+    # B) Coincidencia directa de palabras clave con el título de OTRO PDF diferente al activo
+    coincide_con_nuevo_pdf = False
     if palabras_especificas:
         for c in chunks_data:
             nombre_lower = c["nombre_archivo"].lower()
-            matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_lower)
-            if matches_nom >= 1 and (mencion_explicita_proceso or len(palabras_especificas) >= 2):
-                usuario_solicita_nuevo_doc = True
-                break
+            # Si el documento escaneado NO es el activo previo y coincide con las palabras clave
+            if doc_activo_previo and doc_activo_previo not in nombre_lower:
+                matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_lower)
+                if matches_nom >= 1 and (mencion_estructura or len(palabras_especificas) >= 2):
+                    coincide_con_nuevo_pdf = True
+                    break
 
-    # 3. BÚSQUEDA VECTORIAL DUAL (Sin forzar el documento anterior primero)
-    q_vector_pura = embedder.encode([pregunta])
-    q_vector_pura = np.array(q_vector_pura, dtype="float32")
-    faiss.normalize_L2(q_vector_pura)
-    
-    distances_pura, indices_pura = vector_index.search(q_vector_pura, k=15)
-    
-    # Evaluar si la búsqueda pura encuentra un documento fuerte diferente al activo
-    doc_top_vectorial = None
-    max_sim_pura = 0.0
-    if indices_pura[0][0] < len(chunks_data):
-        doc_top_vectorial = chunks_data[indices_pura[0][0]]["nombre_archivo"].lower()
-        max_sim_pura = float(distances_pura[0][0])
+    usuario_solicita_nuevo_doc = mencion_estructura or coincide_con_nuevo_pdf
 
-    # Si la búsqueda vectorial pura encuentra algo muy afín que NO es el doc anterior, aceptamos cambio de tema
-    if doc_activo_previo and doc_top_vectorial and doc_activo_previo not in doc_top_vectorial:
-        if max_sim_pura > 0.55 or mencion_explicita_proceso:
-            usuario_solicita_nuevo_doc = True
-
-    # 4. CONSTRUCCIÓN DE LA CONSULTA FINAL PARA FAISS
+    # 3. CONSTRUCCIÓN DE LA CONSULTA VECTORIAL CON ANCLAJE
+    # Si tenemos un documento activo y NO se ha pedido explícitamente un cambio de tema,
+    # inyectamos el nombre del documento activo a la query para FAISS.
     query_para_vector = pregunta
     if doc_activo_previo and not usuario_solicita_nuevo_doc:
         nombre_limpio = doc_activo_previo.replace(".pdf", "").replace("_", " ").replace("-", " ")
@@ -317,11 +306,12 @@ def buscar_contexto_relevante(pregunta, historial=None):
 
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    q_vector_final = embedder.encode([query_para_vector])
-    q_vector_final = np.array(q_vector_final, dtype="float32")
-    faiss.normalize_L2(q_vector_final)
+    # 4. Búsqueda Vectorial
+    q_vector = embedder.encode([query_para_vector])
+    q_vector = np.array(q_vector, dtype="float32")
+    faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector_final, k=25)
+    distances, indices = vector_index.search(q_vector, k=25)
     
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
@@ -338,13 +328,13 @@ def buscar_contexto_relevante(pregunta, historial=None):
         matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
         matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
 
-        # Mantenimiento de Hilo: Solo si NO hay cambio de tema detectado
+        # Mantenimiento Dominante de Hilo (Si NO hay cambio de tema explícito)
         if doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
-            chunk_scores[c["chunk_id"]] += 12.0
+            chunk_scores[c["chunk_id"]] += 30.0
 
-        # Impulso a nuevos documentos solicitados
+        # Impulso al nuevo documento si fue solicitado explícitamente
         if usuario_solicita_nuevo_doc and matches_nombre > 0:
-            chunk_scores[c["chunk_id"]] += matches_nombre * 8.0
+            chunk_scores[c["chunk_id"]] += matches_nombre * 10.0
 
         if numeros_buscados:
             matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
