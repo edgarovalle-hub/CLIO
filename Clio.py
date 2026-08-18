@@ -222,18 +222,16 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 import unicodedata
 
 def normalizar_texto(texto):
-    """Elimina acentos, caracteres raros y convierte a minúsculas."""
+    """Limpia tildes, corrupciones UTF-8, espacios extra y convierte a minúsculas."""
     if not texto:
         return ""
-    # Decodificar corrupciones comunes de UTF-8 (como Ã³)
     try:
         texto = texto.encode('latin1').decode('utf-8')
     except (UnicodeEncodeError, UnicodeDecodeError):
         pass
-    # Quitar tildes/acentos
     texto = unicodedata.normalize('NFD', texto)
     texto = ''.join(c for c in texto if unicodedata.category(c) != 'Mn')
-    return texto.lower()
+    return texto.lower().strip()
 
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
@@ -260,28 +258,33 @@ def buscar_contexto_relevante(pregunta, historial=None):
                 if doc_activo_previo:
                     break
 
-    STOPWORDS_BASICAS = {"el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "en", "para", "por", "con", "su", "sus", "que", "cual", "cuál", "como", "cómo", "este", "esta", "proceso", "procedimiento"}
-    
-    # Normalizamos la pregunta limpia de acentos
+    # Normalizamos la pregunta
     pregunta_norm = normalizar_texto(pregunta)
-    palabras_pregunta = [w for w in re.findall(r'\w+', pregunta_norm) if len(w) > 2 and w not in STOPWORDS_BASICAS]
+    
+    # Extraemos palabras de más de 2 caracteres sin filtrar casi nada para asegurar captura
+    palabras_pregunta = [w for w in re.findall(r'\w+', pregunta_norm) if len(w) > 2]
+    
+    # Palabras irrelevantes mínimas
+    STOPWORDS_TRIVIALES = {"del", "las", "los", "por", "para", "con", "una", "uno", "este", "esta", "estos", "cual", "cuál", "que", "que", "como", "cómo"}
+    palabras_clave = [w for w in palabras_pregunta if w not in STOPWORDS_TRIVIALES]
 
-    es_pregunta_seguimiento = len(palabras_pregunta) <= 2
+    es_pregunta_seguimiento = len(palabras_clave) <= 2
     chunk_scores = {i: 0.0 for i in range(len(chunks_data))}
 
-    # 2. ESCANEO NORMALIZADO DE ARCHIVOS
-    if palabras_pregunta:
-        for c in chunks_data:
-            nombre_norm = normalizar_texto(c["nombre_archivo"])
-            matches_nombre = sum(1 for kw in palabras_pregunta if kw in nombre_norm)
-            
-            # Si coinciden 2 o más palabras clave (ej: "fichas" y "redimibles")
-            if matches_nombre >= 2:
-                chunk_scores[c["chunk_id"]] += matches_nombre * 15.0
-            elif matches_nombre == 1 and len(palabras_pregunta) <= 3:
-                chunk_scores[c["chunk_id"]] += 5.0
+    # 2. ESCANEO DIRECTO Y PERMISIVO DE ARCHIVOS
+    for c in chunks_data:
+        nombre_norm = normalizar_texto(c["nombre_archivo"])
+        
+        # Búsqueda por coincidencia de palabras clave individuales
+        matches = [kw for kw in palabras_clave if kw in nombre_norm]
+        
+        if len(matches) >= 2:
+            # Si coinciden 2 o más palabras (ej: "fichas" + "redimibles") -> Pide prioridad absoluta
+            chunk_scores[c["chunk_id"]] += 50.0 
+        elif len(matches) == 1 and not es_pregunta_seguimiento:
+            chunk_scores[c["chunk_id"]] += 10.0
 
-    # 3. VECTORES FAISS
+    # 3. VECTORES FAISS (Aporta entre 0.0 y ~8.0)
     texto_a_vectorizar = query_contextual if (es_pregunta_seguimiento and historial) else pregunta
     q_vector = embedder.encode([texto_a_vectorizar])
     q_vector = np.array(q_vector, dtype="float32")
@@ -292,16 +295,16 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 8.0
 
-    # 4. REGLAS DE ANCLAJE CON TEXTO NORMALIZADO
+    # 4. REGLAS DE ANCLAJE CON PESO MODERADO
     for c in chunks_data:
         nombre_norm = normalizar_texto(c["nombre_archivo"])
         if doc_activo_previo and doc_activo_previo in nombre_norm:
             if es_pregunta_seguimiento:
-                chunk_scores[c["chunk_id"]] += 10.0 # Pregunta corta
+                chunk_scores[c["chunk_id"]] += 15.0 # Pregunta corta ("¿cuál es su inicio?")
             else:
-                chunk_scores[c["chunk_id"]] += 1.0  # Solo le damos un leve empujón
+                chunk_scores[c["chunk_id"]] += 2.0  # Si hay pregunta nueva, no pesa casi nada
 
-    # 5. Ordenar resultados
+    # 5. Selección de resultados
     chunks_con_score = [c for c in chunks_data if chunk_scores[c["chunk_id"]] > 0]
     chunks_ordenados_por_score = sorted(
         chunks_con_score, 
@@ -322,7 +325,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
 
     # Debug en Streamlit
     import streamlit as st
-    st.info(f"📊 **Total chunks cargados:** {len(chunks_data)}")
+    st.info(f"📊 **Total chunks cargados en la base de datos:** {len(chunks_data)}")
     docs_top = [f"{c['nombre_archivo']} (Score: {chunk_scores[c['chunk_id']]:.1f})" for c in chunks_finales]
     st.write("🔍 **Documentos encontrados para esta pregunta:**", docs_top)
             
