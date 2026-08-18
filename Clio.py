@@ -300,6 +300,16 @@ def buscar_contexto_relevante(pregunta, historial=None):
         contexto_recuperado += f"\n--- [DOCUMENTO: {chunk['nombre_archivo']} | PÁGINA {chunk['pagina']}] ---\n"
         contexto_recuperado += chunk['texto'] + "\n"
         fuentes_usadas.add(f"{chunk['nombre_archivo']} (Pág. {chunk['pagina']})")
+
+    # === IMPRESION DE CONTROL EN CONSOLA (DEBUG) ===
+    print("\n--- DEBUG DE BÚSQUEDA ---")
+    print(f"Total chunks en base de datos: {len(chunks_data)}")
+    print(f"Documentos encontrados en el Top 10:")
+    for c in chunks_finales:
+        print(f" -> {c['nombre_archivo']} (Score: {chunk_scores[c['chunk_id']]})")
+    print("---------------------------\n")
+
+    return contexto_recuperado, sorted(list(fuentes_usadas))
             
     return contexto_recuperado, sorted(list(fuentes_usadas))
 # ------------------------------------------------------------------------------
