@@ -1,8 +1,6 @@
 import os
 import io
 import re
-import ftfy
-import unicodedata
 import time
 import pickle
 import urllib.parse
@@ -21,7 +19,7 @@ from google.genai.errors import APIError
 # 1. Configuración General
 # ------------------------------------------------------------------------------
 ROOT_FOLDER_ID = "1EOtPbfr9tH0lhvB4KK9JRb3MA_QjJUzp"
-MODEL_NAME = "gemini-3.5-flash-lite" 
+MODEL_NAME = "gemini-2.5-flash" 
 INDEX_FILE = "faiss_index.bin"
 CHUNKS_FILE = "chunks_data.pkl"
 
@@ -217,31 +215,37 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida (Opción B)
 # ------------------------------------------------------------------------------
-import re
 import unicodedata
-import numpy as np
-
-def corregir_utf8_corrupto(texto):
-    if not texto:
-        return ""
-    try:
-        return texto.encode('latin-1').decode('utf-8')
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        return texto
 
 def normalizar_texto(texto):
+    """Elimina tildes, acentos y convierte a minúsculas para comparaciones exactas."""
     if not texto:
         return ""
-    texto = corregir_utf8_corrupto(texto)
     texto_nfd = unicodedata.normalize('NFD', texto.lower())
     return "".join(c for c in texto_nfd if unicodedata.category(c) != 'Mn')
 
-def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
+def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
-        return "", [], None
+        return "", []
+
+    doc_activo_previo = None
+
+    # 1. Identificar si existe un documento activo en el historial reciente
+    if historial:
+        for msg in reversed(historial):
+            if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
+                lineas = msg["content"].split("\n")
+                for l in lineas:
+                    if ".pdf" in l.lower():
+                        match = re.search(r'([\w-]+\.pdf)', l, re.IGNORECASE)
+                        if match:
+                            doc_activo_previo = normalizar_texto(match.group(1))
+                            break
+                if doc_activo_previo:
+                    break
 
     pregunta_norm = normalizar_texto(pregunta)
-
+    
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
         "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
@@ -249,111 +253,104 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
         "actividad", "actividades", "manual", "politica", "política", "empresa", "saber",
         "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus",
         "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
-        "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion",
-        "encargado", "ejecutar", "rol", "departamento", "tiene", "indícame", "indicame",
-        "flecha", "regreso", "retrabajo", "ciclo", "regresa", "sale", "que", "exacta", "sigue",
-        "primer", "primer paso", "ultimo", "último", "ultimo paso", "último paso"
+        "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion"
     }
 
-    palabras_pregunta = [
+    # Extraer palabras clave normalizadas (sin tildes) de la pregunta actual
+    palabras_especificas = [
         w for w in re.findall(r'\w+', pregunta_norm) 
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
-    # 1. BÚSQUEDA VECTORIAL GLOBAL EN FAISS (Evalúa todo el repositorio)
+    # 2. Evaluar coincidencia de título en la base de datos para detectar cambio de tema
+    mejor_doc_coincidente = None
+    max_matches_titulo = 0
+
+    if palabras_especificas:
+        for c in chunks_data:
+            nombre_norm = normalizar_texto(c["nombre_archivo"])
+            matches = sum(1 for kw in palabras_especificas if kw in nombre_norm)
+            if matches > max_matches_titulo:
+                max_matches_titulo = matches
+                mejor_doc_coincidente = nombre_norm
+
+    # Determinar si el usuario está solicitando explícitamente un nuevo documento
+    es_cambio_de_tema = False
+    if mejor_doc_coincidente and (doc_activo_previo is None or mejor_doc_coincidente not in doc_activo_previo):
+        if max_matches_titulo >= 1:  # Con al menos 1 palabra fuerte del título (ej. "cartas" o "destruccion")
+            es_cambio_de_tema = True
+
+    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
+    chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
+
+    # 3. Puntuación Vectorial
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
-
-    distances, indices = vector_index.search(q_vector, k=min(25, len(chunks_data)))
     
-    faiss_scores = {}
-    top_doc_faiss = None
-    max_score_global = -1.0
-
+    distances, indices = vector_index.search(q_vector, k=15)
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            score_sim = float(sim)
-            faiss_scores[chunks_data[idx]["chunk_id"]] = score_sim
-            if score_sim > max_score_global:
-                max_score_global = score_sim
-                top_doc_faiss = chunks_data[idx]["nombre_archivo"]
+            chunk_scores[idx] += float(sim) * 1.5
 
-    # 2. EVALUAR SI EL DOCUMENTO ACTIVO CONTIENE LA RESPUESTA O SE DEBE CAMBIAR DE TEMA
-    doc_activo_norm = normalizar_texto(doc_activo_actual) if doc_activo_actual else None
-    
-    # Calcular el mejor score dentro del documento activo
-    max_score_doc_activo = 0.0
-    if doc_activo_norm:
-        for c in chunks_data:
-            if doc_activo_norm in normalizar_texto(c["nombre_archivo"]):
-                score_chunk = faiss_scores.get(c["chunk_id"], 0.0)
-                if score_chunk > max_score_doc_activo:
-                    max_score_doc_activo = score_chunk
-
-    # REGLA DE DESBLOQUEO:
-    # Si no hay documento activo, o si FAISS encuentra otro PDF con mejor coincidencia que el documento activo,
-    # se cambia al nuevo documento.
-    es_cambio_de_tema = False
-    if doc_activo_actual:
-        if top_doc_faiss and normalizar_texto(top_doc_faiss) != doc_activo_norm:
-            # Si el nuevo documento supera al activo por un margen claro, soltamos el ancla
-            if max_score_global > (max_score_doc_activo + 0.05):
-                es_cambio_de_tema = True
-
-    # 3. SELECCIÓN DE CANON DE BÚSQUEDA
-    if doc_activo_actual and not es_cambio_de_tema:
-        # Pregunta de seguimiento sobre el mismo manual
-        chunks_candidatos = [c for c in chunks_data if doc_activo_norm in normalizar_texto(c["nombre_archivo"])]
-    else:
-        # Cambio de tema o primera pregunta: Usamos el nuevo documento ganador o todo el repositorio
-        if top_doc_faiss:
-            top_doc_norm = normalizar_texto(top_doc_faiss)
-            chunks_candidatos = [c for c in chunks_data if top_doc_norm in normalizar_texto(c["nombre_archivo"])]
-        else:
-            chunks_candidatos = chunks_data
-
-    # 4. ORDENAR Y SELECCIONAR RESULTADOS FINAL
-    chunk_scores = {}
-    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
-
-    for c in chunks_candidatos:
-        cid = c["chunk_id"]
-        score = faiss_scores.get(cid, 0.0) * 10.0
+    # 4. Asignación Jerárquica de Puntajes
+    for c in chunks_data:
+        nombre_norm = normalizar_texto(c["nombre_archivo"])
         texto_norm = normalizar_texto(c["texto"])
+        
+        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_norm) if palabras_especificas else 0
+        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_norm) if palabras_especificas else 0
 
-        if palabras_pregunta:
-            matches = sum(1 for kw in palabras_pregunta if kw in texto_norm)
-            score += (matches / len(palabras_pregunta)) * 5.0
+        # CASO A: Se detectó un cambio de tema explícito -> Maximizar prioridad al nuevo documento
+        if es_cambio_de_tema and matches_nombre > 0:
+            chunk_scores[c["chunk_id"]] += 30.0 + (matches_nombre * 5.0)
 
+        # CASO B: Continuidad de tema -> Mantener anclaje en el documento activo previo
+        elif doc_activo_previo and doc_activo_previo in nombre_norm and not es_cambio_de_tema:
+            chunk_scores[c["chunk_id"]] += 25.0
+
+        # Números de Actividades solicitados
         if numeros_buscados:
-            for num in numeros_buscados:
-                if re.search(r'\b' + re.escape(num) + r'\b', texto_norm):
-                    score += 15.0
+            matches_numeros = sum(1 for num in numeros_buscados if num in texto_norm or num in nombre_norm)
+            if matches_numeros == len(numeros_buscados):
+                chunk_scores[c["chunk_id"]] += 8.0
 
-        chunk_scores[cid] = score
+        # Coincidencia de contenido general
+        if matches_texto > 0 and palabras_especificas:
+            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
 
-    chunks_ordenados = sorted(
-        chunks_candidatos, 
-        key=lambda c: chunk_scores.get(c["chunk_id"], 0.0), 
+    # 5. Filtrar y ordenar los fragmentos recuperados
+    chunks_ordenados_por_score = sorted(
+        chunks_data, 
+        key=lambda c: chunk_scores[c["chunk_id"]], 
         reverse=True
     )
+    
+    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.5]
+    documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
 
-    chunks_finales = chunks_ordenados[:10]
-    nuevo_doc_activo = chunks_finales[0]["nombre_archivo"] if chunks_finales else doc_activo_actual
+    chunks_finales = []
+    for c in chunks_ordenados_por_score:
+        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
+            chunks_finales.append(c)
 
-    chunks_ordenados_lectura = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
+    if documentos_principales:
+        for c in chunks_data:
+            if c["nombre_archivo"] in documentos_principales:
+                if "[TIPO: ACTIVIDAD FINAL" in c["texto"] and c not in chunks_finales:
+                    chunks_finales.append(c)
+
+    chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
     contexto_recuperado = ""
     fuentes_usadas = set()
     
-    for chunk in chunks_ordenados_lectura:
-        nombre_limpio = corregir_utf8_corrupto(chunk['nombre_archivo'])
-        contexto_recuperado += f"\n--- [DOCUMENTO: {nombre_limpio} | PÁGINA {chunk['pagina']}] ---\n"
+    for chunk in chunks_ordenados:
+        contexto_recuperado += f"\n--- [DOCUMENTO: {chunk['nombre_archivo']} | PÁGINA {chunk['pagina']}] ---\n"
         contexto_recuperado += chunk['texto'] + "\n"
-        fuentes_usadas.add(f"{nombre_limpio} (Pág. {chunk['pagina']})")
+        fuentes_usadas.add(f"{chunk['nombre_archivo']} (Pág. {chunk['pagina']})")
             
-    return contexto_recuperado, sorted(list(fuentes_usadas)), nuevo_doc_activo
+    return contexto_recuperado, sorted(list(fuentes_usadas))
 # ------------------------------------------------------------------------------
 # 5. Renderizado e Interfaz de Usuario
 # ------------------------------------------------------------------------------
@@ -407,9 +404,6 @@ for idx, message in enumerate(st.session_state.messages):
 # ------------------------------------------------------------------------------
 # 6. Procesamiento de Preguntas y Medición de Tiempo
 # ------------------------------------------------------------------------------
-if "doc_activo" not in st.session_state:
-    st.session_state.doc_activo = None
-
 if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
     
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -421,14 +415,7 @@ if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
             try:
                 inicio_tiempo = time.time()
 
-                contexto_filtrado, fuentes, nuevo_doc = buscar_contexto_relevante(
-                    prompt,
-                    doc_activo_actual=st.session_state.get("doc_activo", None)
-                )
-                
-                # Actualizar el documento activo en la memoria de sesión
-                if nuevo_doc:
-                    st.session_state.doc_activo = nuevo_doc
+                contexto_filtrado, fuentes = buscar_contexto_relevante(prompt)
 
                 SYSTEM_PROMPT = f"""
 Eres Clio, el asistente virtual oficial de la empresa. Tu objetivo es explicar procesos, políticas y manuales operativos con máximo detalle, exactitud profesional y rigor.
@@ -437,19 +424,7 @@ FRAGMENTOS RECUPERADOS DE LOS MANUALES OFICIALES:
 \"\"\"
 {contexto_filtrado if contexto_filtrado else "No se encontraron fragmentos relevantes."}
 \"\"\"
-
 Instrucción de extracción estricta: Responde ÚNICAMENTE con los datos explícitos del texto. Queda estrictamente prohibido suponer, deducir o inventar cargos, puestos o actividades que no aparezcan literalmente escritos en el documento.
-
-REGLAS DE RESPUESTA ESTRICTAS:
-1. Responde ÚNICAMENTE basándote en el texto explícito y literal del contexto proporcionado.
-2. Si el usuario pregunta por algo que NO existe en el procedimiento (por ejemplo: flechas de regreso, ciclos de retrabajo, excepciones, roles o pasos no mencionados), DEBES responder categóricamente que dicho elemento NO EXISTE o NO ESTÁ ESPECIFICADO en el documento.
-3. ESTÁ ESTRICTAMENTE PROHIBIDO:
-   - Asumir o deducir consecuencias indirectas (ej. decir que "detener el proceso" equivale a "un ciclo de regreso").
-   - Intentar adaptar o acomodar una respuesta si el documento no contiene el concepto exacto preguntado.
-   - Usar frases como "o definir un estado restrictivo" para justificar la falta de información.
-4. Si un proceso es completamente lineal, indícalo con claridad: "El procedimiento es completamente lineal y no cuenta con ciclos de retrabajo ni condiciones de retorno".
-5. Mantén la respuesta concisa, directa y siempre citando el documento y página correspondiente.
-
 REGLAS DE RESPUESTA UNIVERSALES:
 1. EXPLICACIÓN COMPLETA DE PROCESOS:
    - Al explicar el inicio, detonador o conclusión de cualquier proceso, NO te limites a los resúmenes ejecutivos de carátula si la documentación contiene la matriz detallada de actividades.
@@ -495,24 +470,11 @@ REGLAS DE RESPUESTA UNIVERSALES:
                     temperature=0.0,
                 )
 
-                # LÓGICA DE REINTENTOS AUTOMÁTICOS (MÁXIMO 3 INTENTOS)
-                max_reintentos = 3
-                response = None
-
-                for intento in range(max_reintentos):
-                    try:
-                        response = client.models.generate_content(
-                            model=MODEL_NAME,
-                            contents=chat_history,
-                            config=gemini_config
-                        )
-                        break # Si tuvo éxito, sale del bucle de reintentos
-                    except APIError as e:
-                        if ("503" in str(e) or "UNAVAILABLE" in str(e)) and intento < max_reintentos - 1:
-                            tiempo_espera = (intento + 1) * 2  # Espera 2s en el 1er fallo, 4s en el 2do fallo
-                            time.sleep(tiempo_espera)
-                            continue
-                        raise e # Si es otro error o ya superó los 3 reintentos, lanza la excepción
+                response = client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=chat_history,
+                    config=gemini_config
+                )
 
                 tiempo_total = time.time() - inicio_tiempo
 
@@ -525,10 +487,8 @@ REGLAS DE RESPUESTA UNIVERSALES:
                 st.rerun()
 
             except APIError as e:
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    st.error("☁️ **Servidores de Google saturados (Error 503).** Los servidores de Gemini tienen alta demanda en este momento. Por favor, reintenta tu pregunta en unos segundos.")
-                elif "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    st.error("⏳ **Límite de solicitudes alcanzado (Error 429).** Has superado la cuota permitida por minuto. Por favor espera un momento.")
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    st.error("⏳ **Límite de solicitudes alcanzado (Error 429).** Has superado la cuota permitida por Gemini en el plan gratuito. Por favor espera unos minutos o cambia a la modalidad con facturación.")
                 else:
                     st.error(f"⚠️ Ocurrió un error en la API de Gemini: {e}")
             except Exception as e:
