@@ -237,6 +237,9 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida (Anclaje Estricto de Hilo y Cambio Explícito)
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 4. Búsqueda RAG Híbrida (Anclaje Estricto de Hilo y Transición Explícita)
+# ------------------------------------------------------------------------------
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
@@ -269,7 +272,8 @@ def buscar_contexto_relevante(pregunta, historial=None):
         "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion",
         "identifica", "puntos", "cada", "tipo", "exclusivo", "evalua", "opciones", "secuencial", "paralelo",
         "rol", "roles", "departamento", "encargado", "encargada", "ejecutar", "ejecuta", "realiza",
-        "responsable", "quien", "quién", "id", "numero", "número", "inicial", "termina", "termino", "término"
+        "responsable", "quien", "quién", "id", "numero", "número", "inicial", "termina", "termino", "término",
+        "responde", "unicamente", "justifica", "indica", "texto", "carril", "tarea", "si", "no", "solo", "sólo"
     }
 
     palabras_especificas = [
@@ -277,28 +281,22 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS and not w.isdigit()
     ]
 
-    # 2. DETECCIÓN ESTRICTA DE CAMBIO DE TEMA
-    # A) Palabras explícitas de transición (ej: "del procedimiento X", "en el manual Y", "sobre el proceso Z")
-    patron_cambio = r'(?:del|en el|sobre el|para el)\s+(?:procedimiento|proceso|manual|documento)\s+([a-záéíóúñ0-9\s]{3,30})'
+    # 2. DETECCIÓN ESTRICTA Y SINTÁCTICA DE CAMBIO DE TEMA
+    # A) Captura estructuras claras de cambio (ej: "del procedimiento X", "en el manual Y", "sobre el proceso Z")
+    patron_cambio = r'(?:del|en|para|sobre|respecto\s+a|acerca\s+de|cambiando\s+a)\s+(?:el\s+)?(?:procedimiento|proceso|manual|documento|flujo|protocolo)\s+([a-záéíóúñ0-9\s]{3,50})'
     mencion_estructura = re.search(patron_cambio, query_lower) is not None
 
-    # B) Coincidencia directa de palabras clave con el título de OTRO PDF diferente al activo
-    coincide_con_nuevo_pdf = False
-    if palabras_especificas:
-        for c in chunks_data:
-            nombre_lower = c["nombre_archivo"].lower()
-            # Si el documento escaneado NO es el activo previo y coincide con las palabras clave
-            if doc_activo_previo and doc_activo_previo not in nombre_lower:
-                matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_lower)
-                if matches_nom >= 1 and (mencion_estructura or len(palabras_especificas) >= 2):
-                    coincide_con_nuevo_pdf = True
-                    break
+    # B) Captura códigos explícitos de archivo (ej: PR-IAO-DCO-040) de OTRO documento
+    menciona_codigo_nuevo = False
+    if doc_activo_previo:
+        codigos_en_pregunta = re.findall(r'\b[a-z]{2,4}-[a-z]{2,4}-[a-z]{2,4}-\d{3}\b', query_lower)
+        if codigos_en_pregunta:
+            menciona_codigo_nuevo = not any(cod in doc_activo_previo for cod in codigos_en_pregunta)
 
-    usuario_solicita_nuevo_doc = mencion_estructura or coincide_con_nuevo_pdf
+    # El cambio de tema SOLO se activa si hay intención explícita o no hay documento previo
+    usuario_solicita_nuevo_doc = mencion_estructura or menciona_codigo_nuevo or (not doc_activo_previo)
 
     # 3. CONSTRUCCIÓN DE LA CONSULTA VECTORIAL CON ANCLAJE
-    # Si tenemos un documento activo y NO se ha pedido explícitamente un cambio de tema,
-    # inyectamos el nombre del documento activo a la query para FAISS.
     query_para_vector = pregunta
     if doc_activo_previo and not usuario_solicita_nuevo_doc:
         nombre_limpio = doc_activo_previo.replace(".pdf", "").replace("_", " ").replace("-", " ")
@@ -328,11 +326,11 @@ def buscar_contexto_relevante(pregunta, historial=None):
         matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
         matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
 
-        # Mantenimiento Dominante de Hilo (Si NO hay cambio de tema explícito)
+        # Mantenimiento Dominante del Hilo
         if doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
-            chunk_scores[c["chunk_id"]] += 30.0
+            chunk_scores[c["chunk_id"]] += 35.0
 
-        # Impulso al nuevo documento si fue solicitado explícitamente
+        # Impulso al nuevo documento si fue solicitado de forma explícita
         if usuario_solicita_nuevo_doc and matches_nombre > 0:
             chunk_scores[c["chunk_id"]] += matches_nombre * 10.0
 
