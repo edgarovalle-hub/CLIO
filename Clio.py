@@ -217,7 +217,7 @@ def inicializar_base_vectorial(root_id):
 vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 
 # ------------------------------------------------------------------------------
-# 4. Búsqueda RAG Híbrida (Opción B)
+# 4. Búsqueda RAG Híbrida (Detección de Cambio de Tema Corregida)
 # ------------------------------------------------------------------------------
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
@@ -225,7 +225,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
 
     doc_activo_previo = None
 
-    # 1. Identificar si ya existe un documento activo en el historial reciente
+    # 1. Identificar si ya existe un documento activo en la respuesta previa de la sesión
     if historial:
         for msg in reversed(historial):
             if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
@@ -239,64 +239,60 @@ def buscar_contexto_relevante(pregunta, historial=None):
                 if doc_activo_previo:
                     break
 
-    # 2. Puntuación Vectorial Pura (Evalúa la intención semántica global)
+    # 2. Búsqueda Vectorial Pura (Calcula la afinidad real contra todo el catálogo)
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=15)
+    distances, indices = vector_index.search(q_vector, k=20)
 
-    # 3. Detección de cambio de tema por similitud semántica
+    # Identificar el documento dominante devuelto por la búsqueda semántica de FAISS
     top_doc_encontrado = None
-    max_simil = 0.0
     if len(indices[0]) > 0 and indices[0][0] < len(chunks_data):
-        max_simil = float(distances[0][0])
         top_doc_encontrado = chunks_data[indices[0][0]]["nombre_archivo"].lower()
 
-    # Si el resultado con mayor afinidad proviene de otro PDF con un score alto, es un cambio de tema
-    es_cambio_de_tema = False
-    if doc_activo_previo and top_doc_encontrado and (top_doc_encontrado != doc_activo_previo):
-        if max_simil > 0.35:
-            es_cambio_de_tema = True
+    # Determinar si la pregunta pertenece al mismo documento activo o es un tema diferente
+    mismo_tema = False
+    if doc_activo_previo and top_doc_encontrado:
+        if doc_activo_previo in top_doc_encontrado or top_doc_encontrado in doc_activo_previo:
+            mismo_tema = True
 
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
+    # Sumar directamente la puntuación de similitud calculada por FAISS a cada chunk
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 10.0
 
-    # 4. Evaluación Jerárquica de Prioridad
+    # 3. Puntuación Jerárquica y Bonificaciones
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
 
     for c in chunks_data:
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
 
-        # Solo aplicamos impulso al doc anterior si el usuario NO cambió de tema
-        if doc_activo_previo and (doc_activo_previo in nombre_lower) and not es_cambio_de_tema:
-            chunk_scores[c["chunk_id"]] += 3.0
+        # Solo aplicamos impulso al documento anterior si la nueva pregunta pertenece explícitamente al mismo tema
+        if mismo_tema and (doc_activo_previo in nombre_lower):
+            chunk_scores[c["chunk_id"]] += 1.5
 
-        # Coincidencia de números de actividad
+        # Bonificación si coincide con los números de actividad consultados
         if numeros_buscados:
             matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
             if matches_numeros == len(numeros_buscados):
-                chunk_scores[c["chunk_id"]] += 5.0
+                chunk_scores[c["chunk_id"]] += 3.0
 
-    # 5. Selección y ordenamiento de resultados
+    # 4. Selección de los fragmentos con mayor puntuación
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
         reverse=True
     )
     
-    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 1.0]
-    documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
+    # Tomar los 10 mejores fragmentos encontrados
+    chunks_finales = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.0][:10]
 
-    chunks_finales = []
-    for c in chunks_ordenados_por_score:
-        if chunk_scores[c["chunk_id"]] > 0.5 and len(chunks_finales) < 10:
-            chunks_finales.append(c)
-
+    # Asegurar incluir las actividades finales/conclusiones del documento principal detectado
+    documentos_principales = set(c["nombre_archivo"] for c in chunks_finales[:3])
     if documentos_principales:
         for c in chunks_data:
             if c["nombre_archivo"] in documentos_principales:
@@ -391,7 +387,7 @@ Eres Clio, el asistente virtual oficial de la empresa. Tu objetivo es explicar p
 === INSTRUCCIONES DE ATENCIÓN Y NAVEGACIÓN ===
 
 1. FLEXIBILIDAD DE CONTEXTO:
-   - El usuario puede cambiar de tema, procedimiento o documento en cualquier momento de la conversación.
+   - El usuario puede cambiar de tema, procedimiento o documento en cualquier momento de la conversación sin necesidad de especificar el nombre exacto del archivo.
    - NUNCA asumas que la consulta actual debe continuar limitada al documento o procedimiento mencionado en los mensajes anteriores.
 
 2. EVALUACIÓN DE INFORMACIÓN DISPONIBLE:
