@@ -226,11 +226,10 @@ def buscar_contexto_relevante(pregunta, historial=None):
     query_contextual = pregunta
     doc_activo_previo = None
 
-    # 1. Identificar si ya existe un documento activo en el historial reciente
+    # 1. Identificar si existe un documento activo en el historial reciente
     if historial:
         mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
         if mensajes_usuario:
-            # Concatenamos las últimas preguntas para resolver pronombres ("su", "este", "eso")
             query_contextual = " ".join(mensajes_usuario[-2:])
         
         for msg in reversed(historial):
@@ -245,38 +244,22 @@ def buscar_contexto_relevante(pregunta, historial=None):
                 if doc_activo_previo:
                     break
 
-    query_lower = pregunta.lower()
-    
-    STOPWORDS_OPERATIVAS = {
-        "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
-        "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
-        "cual", "cuál", "como", "cómo", "para", "donde", "dónde", "pasos",
-        "actividad", "actividades", "manual", "politica", "política", "empresa", "saber",
-        "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus",
-        "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
-        "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion",
-        "identifica", "puntos", "cada", "tipo", "exclusivo", "evalua", "opciones", "secuencial", "paralelo"
-    }
+    # Limpieza mínima de palabras para evaluar coincidencia de títulos
+    STOPWORDS_BASICAS = {"el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "en", "para", "por", "con", "su", "sus", "que", "cual", "cuál", "como", "cómo", "este", "esta"}
+    palabras_pregunta = [w.lower() for w in re.findall(r'\w+', pregunta) if len(w) > 2 and w.lower() not in STOPWORDS_BASICAS]
 
-    palabras_especificas = [
-        w for w in re.findall(r'\w+', query_lower) 
-        if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
-    ]
+    # Detectar si la pregunta es muy corta/ambigua ("¿cuál es su inicio?", "¿quién lo aprueba?")
+    es_pregunta_seguimiento = len(palabras_pregunta) <= 2
 
-    # Detectar si el usuario está haciendo una pregunta MUY CORTA o de seguimiento (ej: "cuál es su inicio")
-    es_pregunta_seguimiento = len(palabras_especificas) <= 2
-
-    # 2. Puntuación Vectorial (FAISS) usando la query contextualizada
-    # Usamos query_contextual si es pregunta de seguimiento para no perder el tema
+    # 2. Vectorización usando FAISS (Paso principal)
     texto_a_vectorizar = query_contextual if (es_pregunta_seguimiento and historial) else pregunta
     
     q_vector = embedder.encode([texto_a_vectorizar])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    # Pedimos los 50 mejores candidatos a FAISS (esto toma 0.001 segundos)
-    k_candidatos = 50
-    distances, indices = vector_index.search(q_vector, k=k_candidatos)
+    # Traemos los mejores 40 fragmentos semánticos
+    distances, indices = vector_index.search(q_vector, k=40)
     
     chunk_scores = {}
     candidatos_ids = []
@@ -284,38 +267,28 @@ def buscar_contexto_relevante(pregunta, historial=None):
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
             candidatos_ids.append(idx)
+            # FAISS da la puntuación base pura
             chunk_scores[idx] = float(sim) * 10.0
 
-    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
-
-    # 3. Evaluación SOLO sobre los candidatos de FAISS (RÁPIDO)
+    # 3. Boost inteligente por coincidencias directas
     for idx in candidatos_ids:
         c = chunks_data[idx]
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
         
-        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
-        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
+        # Coincidencias con el nombre del archivo
+        matches_nombre = sum(1 for kw in palabras_pregunta if kw in nombre_lower) if palabras_pregunta else 0
+        if matches_nombre > 0:
+            chunk_scores[idx] += matches_nombre * 4.0
 
-        # Si es pregunta de seguimiento sin palabras clave nuevas, reforzamos el documento activo
+        # Anclaje de conversación previa
         if doc_activo_previo and doc_activo_previo in nombre_lower:
             if es_pregunta_seguimiento:
-                chunk_scores[idx] += 15.0  # Anclaje fuerte si la pregunta es corta/ambigua
+                chunk_scores[idx] += 8.0  # Si la pregunta es corta, mantiene el PDF actual
             else:
-                chunk_scores[idx] += 3.0   # Anclaje suave si la pregunta trae palabras propias
+                chunk_scores[idx] += 1.5  # Si hace una pregunta completa, da solo un leve empujón
 
-        if matches_nombre >= 1 and palabras_especificas:
-            chunk_scores[idx] += (matches_nombre / len(palabras_especificas)) * 8.0
-
-        if numeros_buscados:
-            matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
-            if matches_numeros == len(numeros_buscados):
-                chunk_scores[idx] += 5.0
-
-        if matches_texto > 0 and palabras_especificas:
-            chunk_scores[idx] += (matches_texto / len(palabras_especificas)) * 2.0
-
-    # 4. Ordenar únicamente los candidatos filtrados
+    # 4. Ordenar y seleccionar los mejores 10 fragmentos
     chunks_candidatos = [chunks_data[idx] for idx in candidatos_ids]
     chunks_ordenados_por_score = sorted(
         chunks_candidatos, 
