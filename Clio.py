@@ -258,76 +258,42 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
 
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
 
-    # 1. Detectar si el usuario solicita EXPLÍCITAMENTE cambiar de documento
-    mejor_doc_coincidente = None
-    max_matches_titulo = 0
-
-    if palabras_especificas:
-        for c in chunks_data:
-            nombre_norm = normalizar_texto(c["nombre_archivo"])
-            matches = sum(1 for kw in palabras_especificas if kw in nombre_norm)
-            if matches > max_matches_titulo:
-                max_matches_titulo = matches
-                mejor_doc_coincidente = c["nombre_archivo"]
-
-    es_cambio_de_tema = False
-    if mejor_doc_coincidente:
-        doc_coincidente_norm = normalizar_texto(mejor_doc_coincidente)
-        # Solo cambia de tema si hay coincidencia explícita con el TÍTULO de OTRO documento
-        if doc_activo_norm is None or doc_coincidente_norm not in doc_activo_norm:
-            if max_matches_titulo >= 1:
-                es_cambio_de_tema = True
-
-    # 2. Inyección del Documento Activo en la Búsqueda Vectorial (Query Contextual)
-    if doc_activo_actual and not es_cambio_de_tema:
-        pregunta_busqueda = f"En el documento {doc_activo_actual}: {pregunta}"
-    else:
-        pregunta_busqueda = pregunta
-
+    # Inicializar puntajes
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # Vectorización
-    q_vector = embedder.encode([pregunta_busqueda])
+    # 1. Búsqueda Vectorial Pura (Similitud semántica de FAISS)
+    q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
     distances, indices = vector_index.search(q_vector, k=25)
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            chunk_scores[idx] += float(sim) * 1.5
+            chunk_scores[idx] += float(sim) * 10.0  # La similitud semántica lidera la búsqueda
 
-    # 3. Puntuación Jerárquica y Anclaje
-    nuevo_doc_activo = doc_activo_actual
-
+    # 2. Ajuste de Puntuación Equilibrado (sin bloqueos rígidos)
     for c in chunks_data:
         nombre_norm = normalizar_texto(c["nombre_archivo"])
         texto_norm = normalizar_texto(c["texto"])
         
-        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_norm) if palabras_especificas else 0
-        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_norm) if palabras_especificas else 0
+        # Coincidencia de términos clave específicos en el texto (ej. "baccarat")
+        if palabras_especificas:
+            matches_texto = sum(1 for kw in palabras_especificas if kw in texto_norm)
+            if matches_texto > 0:
+                chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 5.0
 
-        # CASO A: Solicitud de cambio de documento
-        if es_cambio_de_tema and mejor_doc_coincidente and normalizar_texto(mejor_doc_coincidente) in nombre_norm:
-            chunk_scores[c["chunk_id"]] += 100.0
-            nuevo_doc_activo = mejor_doc_coincidente
-
-        # CASO B: Bloqueo de continuidad en el documento activo (+150.0)
-        elif doc_activo_norm and doc_activo_norm in nombre_norm and not es_cambio_de_tema:
-            chunk_scores[c["chunk_id"]] += 150.0
-
-        # Prioridad a números de actividad
+        # Coincidencia por números de actividad
         if numeros_buscados:
             for num in numeros_buscados:
                 if re.search(r'\b' + re.escape(num) + r'\b', texto_norm):
-                    if doc_activo_norm and doc_activo_norm in nombre_norm:
-                        chunk_scores[c["chunk_id"]] += 50.0
-                    else:
-                        chunk_scores[c["chunk_id"]] += 20.0
+                    chunk_scores[c["chunk_id"]] += 15.0
 
-        if matches_texto > 0 and palabras_especificas:
-            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
+        # Bono suave de continuidad (1.5 pts) para que un término clave más fuerte (ej. Baccarat) 
+        # pueda vencer al documento activo si pertenece a otro manual
+        if doc_activo_norm and doc_activo_norm in nombre_norm:
+            chunk_scores[c["chunk_id"]] += 1.5
 
-    # 4. Ordenar y seleccionar fragmentos
+    # 3. Filtrar y seleccionar fragmentos ganadores
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
@@ -339,8 +305,8 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
         if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
             chunks_finales.append(c)
 
-    if chunks_finales and (nuevo_doc_activo is None or es_cambio_de_tema):
-        nuevo_doc_activo = chunks_finales[0]["nombre_archivo"]
+    # Actualizar el nuevo documento activo según el fragmento con mejor puntaje
+    nuevo_doc_activo = chunks_finales[0]["nombre_archivo"] if chunks_finales else doc_activo_actual
 
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
