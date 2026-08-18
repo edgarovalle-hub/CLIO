@@ -223,15 +223,10 @@ def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
 
-    query_contextual = pregunta
     doc_activo_previo = None
 
     # 1. Identificar si ya existe un documento activo en el historial reciente
     if historial:
-        mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
-        if mensajes_usuario:
-            query_contextual = " ".join(mensajes_usuario[-2:])
-        
         for msg in reversed(historial):
             if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
                 lineas = msg["content"].split("\n")
@@ -244,73 +239,48 @@ def buscar_contexto_relevante(pregunta, historial=None):
                 if doc_activo_previo:
                     break
 
-    query_lower = pregunta.lower()
-    
-    STOPWORDS_OPERATIVAS = {
-        "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
-        "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
-        "cual", "cuál", "como", "cómo", "para", "donde", "dónde", "pasos",
-        "actividad", "actividades", "manual", "politica", "política", "empresa", "saber",
-        "del", "las", "los", "que", "con", "por", "para", "una", "uno", "unos", "su", "sus",
-        "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
-        "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion",
-        "identifica", "puntos", "cada", "tipo", "exclusivo", "evalua", "opciones", "secuencial", "paralelo"
-    }
-
-    palabras_especificas = [
-        w for w in re.findall(r'\w+', query_lower) 
-        if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
-    ]
-
-    # 2. Verificar si la pregunta del usuario menciona explícitamente UN NUEVO MANUAL
-    usuario_solicita_nuevo_doc = False
-    if palabras_especificas:
-        for c in chunks_data:
-            nombre_lower = c["nombre_archivo"].lower()
-            # Si al menos 2 palabras clave coinciden con el título de un PDF, es un cambio explícito
-            matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_lower)
-            if matches_nom >= 2:
-                usuario_solicita_nuevo_doc = True
-                break
-
-    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
-    chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
-
-    # 3. Puntuación Vectorial
+    # 2. Puntuación Vectorial Pura (Evalúa la intención semántica global)
     q_vector = embedder.encode([pregunta])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
     distances, indices = vector_index.search(q_vector, k=15)
+
+    # 3. Detección de cambio de tema por similitud semántica
+    top_doc_encontrado = None
+    max_simil = 0.0
+    if len(indices[0]) > 0 and indices[0][0] < len(chunks_data):
+        max_simil = float(distances[0][0])
+        top_doc_encontrado = chunks_data[indices[0][0]]["nombre_archivo"].lower()
+
+    # Si el resultado con mayor afinidad proviene de otro PDF con un score alto, es un cambio de tema
+    es_cambio_de_tema = False
+    if doc_activo_previo and top_doc_encontrado and (top_doc_encontrado != doc_activo_previo):
+        if max_simil > 0.35:
+            es_cambio_de_tema = True
+
+    chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
+
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            chunk_scores[idx] += float(sim) * 1.5
+            chunk_scores[idx] += float(sim) * 10.0
 
-# 4. Evaluación Jerárquica de Prioridad
+    # 4. Evaluación Jerárquica de Prioridad
+    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
+
     for c in chunks_data:
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
-        
-        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
-        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
 
-        # REGLA B CORREGIDA: Si detecta palabras clave del título de un nuevo PDF, le da prioridad absoluta (+50)
-        if matches_nombre >= 1 and usuario_solicita_nuevo_doc:
-            chunk_scores[c["chunk_id"]] += 50.0
+        # Solo aplicamos impulso al doc anterior si el usuario NO cambió de tema
+        if doc_activo_previo and (doc_activo_previo in nombre_lower) and not es_cambio_de_tema:
+            chunk_scores[c["chunk_id"]] += 3.0
 
-        # REGLA A CORREGIDA: Solo aplica el anclaje si el usuario NO solicitó un documento distinto
-        elif doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
-            chunk_scores[c["chunk_id"]] += 15.0  # Bajamos de 35 a 15 para no "secuestrar" la búsqueda
-
-        # REGLA C: Coincidencia de números de actividad
+        # Coincidencia de números de actividad
         if numeros_buscados:
             matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
             if matches_numeros == len(numeros_buscados):
-                chunk_scores[c["chunk_id"]] += 8.0
-
-        # Coincidencia textual general
-        if matches_texto > 0 and palabras_especificas:
-            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 5.0
+                chunk_scores[c["chunk_id"]] += 5.0
 
     # 5. Selección y ordenamiento de resultados
     chunks_ordenados_por_score = sorted(
@@ -319,12 +289,12 @@ def buscar_contexto_relevante(pregunta, historial=None):
         reverse=True
     )
     
-    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.5]
+    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 1.0]
     documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
 
     chunks_finales = []
     for c in chunks_ordenados_por_score:
-        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
+        if chunk_scores[c["chunk_id"]] > 0.5 and len(chunks_finales) < 10:
             chunks_finales.append(c)
 
     if documentos_principales:
@@ -344,6 +314,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
         fuentes_usadas.add(f"{chunk['nombre_archivo']} (Pág. {chunk['pagina']})")
             
     return contexto_recuperado, sorted(list(fuentes_usadas))
+
 # ------------------------------------------------------------------------------
 # 5. Renderizado e Interfaz de Usuario
 # ------------------------------------------------------------------------------
@@ -464,7 +435,7 @@ REGLAS DE RESPUESTA UNIVERSALES:
 6. Para saludos o preguntas generales de cortesía, responde brevemente sin usar `---FUENTE---`.
 """
                 prompt_final = SYSTEM_PROMPT.format(
-                contexto_filtrado=contexto_filtrado if contexto_filtrado else "No se encontraron fragmentos relevantes."
+                    contexto_filtrado=contexto_filtrado if contexto_filtrado else "No se encontraron fragmentos relevantes."
                 )
 
                 chat_history = []
