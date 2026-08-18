@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------------
-# CLIO - Asistente Virtual RAG (Versión Optimizada para Selección Dinámica de Contexto)
+# backup las 10 preguntas de fichas no redimibles están correctas con hilo y logica
 # ---------------------------------------------------------------------------------
 
 import os
@@ -7,7 +7,6 @@ import io
 import re
 import time
 import pickle
-import unicodedata
 import urllib.parse
 import requests
 import numpy as np
@@ -34,6 +33,7 @@ st.caption("Asistente virtual especializado en procesos y manuales operativos de
 
 @st.cache_resource
 def get_gemini_client():
+    # Soporta tanto GEMINI_API_KEY como GEMINI_FREE_KEY o variables de entorno
     api_key = (
         st.secrets.get("GEMINI_API_KEY")
         or st.secrets.get("GEMINI_FREE_KEY")
@@ -183,12 +183,14 @@ def crear_chunks_inteligentes(paginas_doc):
 
 @st.cache_resource
 def inicializar_base_vectorial(root_id):
+    # Cargar los índices si ya fueron generados
     if os.path.exists(INDEX_FILE) and os.path.exists(CHUNKS_FILE):
         index = faiss.read_index(INDEX_FILE)
         with open(CHUNKS_FILE, "rb") as f:
             chunks = pickle.load(f)
         return index, chunks
 
+    # Generación completa si no existen los binarios
     paginas = extraer_paginas_pdf(root_id)
     if not paginas:
         return None, []
@@ -211,26 +213,25 @@ def inicializar_base_vectorial(root_id):
     
     return index, chunks
 
+# Carga inicial
 vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 
 # ------------------------------------------------------------------------------
-# 4. Búsqueda RAG Híbrida Optimizada (Manejo Dinámico de Contexto)
+# 4. Búsqueda RAG Híbrida (Opción B)
 # ------------------------------------------------------------------------------
-def normalizar_texto_simple(texto):
-    """Elimina acentos y caracteres especiales para comparaciones efectivas."""
-    if not texto:
-        return ""
-    texto_nfkd = unicodedata.normalize('NFKD', texto)
-    return "".join([c for c in texto_nfkd if not unicodedata.combining(c)]).lower()
-
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
 
+    query_contextual = pregunta
     doc_activo_previo = None
 
-    # 1. Identificar si existe un documento activo en el historial reciente
+    # 1. Identificar si ya existe un documento activo en el historial reciente
     if historial:
+        mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
+        if mensajes_usuario:
+            query_contextual = " ".join(mensajes_usuario[-2:])
+        
         for msg in reversed(historial):
             if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
                 lineas = msg["content"].split("\n")
@@ -238,12 +239,12 @@ def buscar_contexto_relevante(pregunta, historial=None):
                     if ".pdf" in l.lower():
                         match = re.search(r'([\w-]+\.pdf)', l, re.IGNORECASE)
                         if match:
-                            doc_activo_previo = normalizar_texto_simple(match.group(1))
+                            doc_activo_previo = match.group(1).lower()
                             break
                 if doc_activo_previo:
                     break
 
-    query_norm = normalizar_texto_simple(pregunta)
+    query_lower = pregunta.lower()
     
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
@@ -257,20 +258,20 @@ def buscar_contexto_relevante(pregunta, historial=None):
     }
 
     palabras_especificas = [
-        w for w in re.findall(r'\w+', query_norm) 
+        w for w in re.findall(r'\w+', query_lower) 
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
-    # 2. Determinar si se consulta por un documento nuevo
+    # 2. Verificar si la pregunta del usuario menciona explícitamente UN NUEVO MANUAL
     usuario_solicita_nuevo_doc = False
     if palabras_especificas:
         for c in chunks_data:
-            nombre_norm = normalizar_texto_simple(c["nombre_archivo"])
-            matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_norm)
-            if matches_nom >= 1:
-                if not doc_activo_previo or doc_activo_previo not in nombre_norm:
-                    usuario_solicita_nuevo_doc = True
-                    break
+            nombre_lower = c["nombre_archivo"].lower()
+            # Si al menos 2 palabras clave coinciden con el título de un PDF, es un cambio explícito
+            matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_lower)
+            if matches_nom >= 2:
+                usuario_solicita_nuevo_doc = True
+                break
 
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
@@ -280,56 +281,57 @@ def buscar_contexto_relevante(pregunta, historial=None):
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=20)
+    distances, indices = vector_index.search(q_vector, k=15)
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            chunk_scores[idx] += float(sim) * 2.0
+            chunk_scores[idx] += float(sim) * 1.5
 
-    # 4. Evaluación Jerárquica de Coincidencias
+# 4. Evaluación Jerárquica de Prioridad
     for c in chunks_data:
-        nombre_norm = normalizar_texto_simple(c["nombre_archivo"])
-        texto_norm = normalizar_texto_simple(c["texto"])
+        nombre_lower = c["nombre_archivo"].lower()
+        texto_lower = c["texto"].lower()
         
-        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_norm) if palabras_especificas else 0
-        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_norm) if palabras_especificas else 0
+        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
+        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
 
-        # Prioridad a títulos coincidentes
-        if matches_nombre >= 1:
-            chunk_scores[c["chunk_id"]] += 30.0 * matches_nombre
+        # REGLA B CORREGIDA: Si detecta palabras clave del título de un nuevo PDF, le da prioridad absoluta (+50)
+        if matches_nombre >= 1 and usuario_solicita_nuevo_doc:
+            chunk_scores[c["chunk_id"]] += 50.0
 
-        # Anclaje suave al contexto anterior sólo si no cambió de tema
-        elif doc_activo_previo and doc_activo_previo in nombre_norm and not usuario_solicita_nuevo_doc:
-            chunk_scores[c["chunk_id"]] += 5.0
+        # REGLA A CORREGIDA: Solo aplica el anclaje si el usuario NO solicitó un documento distinto
+        elif doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
+            chunk_scores[c["chunk_id"]] += 15.0  # Bajamos de 35 a 15 para no "secuestrar" la búsqueda
 
-        # Coincidencia con números de actividad
+        # REGLA C: Coincidencia de números de actividad
         if numeros_buscados:
-            matches_numeros = sum(1 for num in numeros_buscados if num in texto_norm or num in nombre_norm)
+            matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
             if matches_numeros == len(numeros_buscados):
                 chunk_scores[c["chunk_id"]] += 8.0
 
-        # Coincidencia en cuerpo del texto
+        # Coincidencia textual general
         if matches_texto > 0 and palabras_especificas:
-            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 4.0
+            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 5.0
 
-    # 5. Selección final de fragmentos
+    # 5. Selección y ordenamiento de resultados
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
         reverse=True
     )
     
+    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.5]
+    documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
+
     chunks_finales = []
     for c in chunks_ordenados_por_score:
-        if chunk_scores[c["chunk_id"]] > 0.5 and len(chunks_finales) < 10:
+        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
             chunks_finales.append(c)
 
-    if chunks_finales:
-        doc_principal = chunks_finales[0]["nombre_archivo"]
+    if documentos_principales:
         for c in chunks_data:
-            if c["nombre_archivo"] == doc_principal and "[TIPO: ACTIVIDAD FINAL" in c["texto"]:
-                if c not in chunks_finales:
+            if c["nombre_archivo"] in documentos_principales:
+                if "[TIPO: ACTIVIDAD FINAL" in c["texto"] and c not in chunks_finales:
                     chunks_finales.append(c)
-                    break
 
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
@@ -342,7 +344,6 @@ def buscar_contexto_relevante(pregunta, historial=None):
         fuentes_usadas.add(f"{chunk['nombre_archivo']} (Pág. {chunk['pagina']})")
             
     return contexto_recuperado, sorted(list(fuentes_usadas))
-
 # ------------------------------------------------------------------------------
 # 5. Renderizado e Interfaz de Usuario
 # ------------------------------------------------------------------------------
@@ -396,8 +397,24 @@ for idx, message in enumerate(st.session_state.messages):
 # ------------------------------------------------------------------------------
 # 6. Procesamiento de Preguntas y Medición de Tiempo
 # ------------------------------------------------------------------------------
+if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
+    
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-PLANTILLA_SYSTEM_PROMPT = """
+    with st.chat_message("assistant"):
+        with st.spinner("Buscando información..."):
+            try:
+                inicio_tiempo = time.time()
+
+                contexto_filtrado, fuentes = buscar_contexto_relevante(
+                    prompt, 
+                    historial=st.session_state.messages
+                )
+
+                # Usamos sustitución limpia con .format() para evitar conflictos con las f-strings
+                SYSTEM_PROMPT = """
 Eres Clio, el asistente virtual oficial de la empresa. Tu objetivo es explicar procesos, políticas y manuales operativos con máximo detalle, exactitud profesional y rigor.
 
 === INSTRUCCIONES DE ATENCIÓN Y NAVEGACIÓN ===
@@ -446,25 +463,8 @@ REGLAS DE RESPUESTA UNIVERSALES:
 
 6. Para saludos o preguntas generales de cortesía, responde brevemente sin usar `---FUENTE---`.
 """
-
-if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
-    
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Buscando información..."):
-            try:
-                inicio_tiempo = time.time()
-
-                contexto_filtrado, fuentes = buscar_contexto_relevante(
-                    prompt, 
-                    historial=st.session_state.messages
-                )
-
-                prompt_final = PLANTILLA_SYSTEM_PROMPT.format(
-                    contexto_filtrado=contexto_filtrado if contexto_filtrado else "No se encontraron fragmentos relevantes."
+                prompt_final = SYSTEM_PROMPT.format(
+                contexto_filtrado=contexto_filtrado if contexto_filtrado else "No se encontraron fragmentos relevantes."
                 )
 
                 chat_history = []
@@ -489,6 +489,7 @@ if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
                     temperature=0.0,
                 )
 
+                # LÓGICA DE REINTENTOS AUTOMÁTICOS (MÁXIMO 3 INTENTOS)
                 max_reintentos = 3
                 response = None
 
@@ -499,13 +500,13 @@ if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
                             contents=chat_history,
                             config=gemini_config
                         )
-                        break
+                        break # Si tuvo éxito, sale del bucle de reintentos
                     except APIError as e:
                         if ("503" in str(e) or "UNAVAILABLE" in str(e)) and intento < max_reintentos - 1:
-                            tiempo_espera = (intento + 1) * 2
+                            tiempo_espera = (intento + 1) * 2  # Espera 2s en el 1er fallo, 4s en el 2do fallo
                             time.sleep(tiempo_espera)
                             continue
-                        raise e
+                        raise e # Si es otro error o ya superó los 3 reintentos, lanza la excepción
 
                 tiempo_total = time.time() - inicio_tiempo
 
