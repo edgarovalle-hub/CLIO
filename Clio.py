@@ -372,7 +372,10 @@ if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
             try:
                 inicio_tiempo = time.time()
 
-                contexto_filtrado, fuentes = buscar_contexto_relevante(prompt)
+                contexto_filtrado, fuentes = buscar_contexto_relevante(
+                prompt, 
+                historial=st.session_state.messages
+                )
 
                 SYSTEM_PROMPT = f"""
 Eres Clio, el asistente virtual oficial de la empresa. Tu objetivo es explicar procesos, políticas y manuales operativos con máximo detalle, exactitud profesional y rigor.
