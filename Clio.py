@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------------
-# backup las 10 preguntas de fichas no redimibles están correctas con hilo y logica
+# CLIO - Asistente Virtual RAG (Versión Optimizada para Selección Dinámica de Contexto)
 # ---------------------------------------------------------------------------------
 
 import os
@@ -7,6 +7,7 @@ import io
 import re
 import time
 import pickle
+import unicodedata
 import urllib.parse
 import requests
 import numpy as np
@@ -33,7 +34,6 @@ st.caption("Asistente virtual especializado en procesos y manuales operativos de
 
 @st.cache_resource
 def get_gemini_client():
-    # Soporta tanto GEMINI_API_KEY como GEMINI_FREE_KEY o variables de entorno
     api_key = (
         st.secrets.get("GEMINI_API_KEY")
         or st.secrets.get("GEMINI_FREE_KEY")
@@ -183,14 +183,12 @@ def crear_chunks_inteligentes(paginas_doc):
 
 @st.cache_resource
 def inicializar_base_vectorial(root_id):
-    # Cargar los índices si ya fueron generados
     if os.path.exists(INDEX_FILE) and os.path.exists(CHUNKS_FILE):
         index = faiss.read_index(INDEX_FILE)
         with open(CHUNKS_FILE, "rb") as f:
             chunks = pickle.load(f)
         return index, chunks
 
-    # Generación completa si no existen los binarios
     paginas = extraer_paginas_pdf(root_id)
     if not paginas:
         return None, []
@@ -213,25 +211,26 @@ def inicializar_base_vectorial(root_id):
     
     return index, chunks
 
-# Carga inicial
 vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 
 # ------------------------------------------------------------------------------
-# 4. Búsqueda RAG Híbrida (Opción B)
+# 4. Búsqueda RAG Híbrida Optimizada (Manejo Dinámico de Contexto)
 # ------------------------------------------------------------------------------
+def normalizar_texto_simple(texto):
+    """Elimina acentos y caracteres especiales para comparaciones efectivas."""
+    if not texto:
+        return ""
+    texto_nfkd = unicodedata.normalize('NFKD', texto)
+    return "".join([c for c in texto_nfkd if not unicodedata.combining(c)]).lower()
+
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
 
-    query_contextual = pregunta
     doc_activo_previo = None
 
-    # 1. Identificar si ya existe un documento activo en el historial reciente
+    # 1. Identificar si existe un documento activo en el historial reciente
     if historial:
-        mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
-        if mensajes_usuario:
-            query_contextual = " ".join(mensajes_usuario[-2:])
-        
         for msg in reversed(historial):
             if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
                 lineas = msg["content"].split("\n")
@@ -239,12 +238,12 @@ def buscar_contexto_relevante(pregunta, historial=None):
                     if ".pdf" in l.lower():
                         match = re.search(r'([\w-]+\.pdf)', l, re.IGNORECASE)
                         if match:
-                            doc_activo_previo = match.group(1).lower()
+                            doc_activo_previo = normalizar_texto_simple(match.group(1))
                             break
                 if doc_activo_previo:
                     break
 
-    query_lower = pregunta.lower()
+    query_norm = normalizar_texto_simple(pregunta)
     
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
@@ -258,20 +257,20 @@ def buscar_contexto_relevante(pregunta, historial=None):
     }
 
     palabras_especificas = [
-        w for w in re.findall(r'\w+', query_lower) 
+        w for w in re.findall(r'\w+', query_norm) 
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
-    # 2. Verificar si la pregunta del usuario menciona explícitamente UN NUEVO MANUAL
+    # 2. Determinar si se consulta por un documento nuevo
     usuario_solicita_nuevo_doc = False
     if palabras_especificas:
         for c in chunks_data:
-            nombre_lower = c["nombre_archivo"].lower()
-            # Si al menos 2 palabras clave coinciden con el título de un PDF, es un cambio explícito
-            matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_lower)
-            if matches_nom >= 2:
-                usuario_solicita_nuevo_doc = True
-                break
+            nombre_norm = normalizar_texto_simple(c["nombre_archivo"])
+            matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_norm)
+            if matches_nom >= 1:
+                if not doc_activo_previo or doc_activo_previo not in nombre_norm:
+                    usuario_solicita_nuevo_doc = True
+                    break
 
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
@@ -281,57 +280,56 @@ def buscar_contexto_relevante(pregunta, historial=None):
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=15)
+    distances, indices = vector_index.search(q_vector, k=20)
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            chunk_scores[idx] += float(sim) * 1.5
+            chunk_scores[idx] += float(sim) * 2.0
 
-# 4. Evaluación Jerárquica de Prioridad
+    # 4. Evaluación Jerárquica de Coincidencias
     for c in chunks_data:
-        nombre_lower = c["nombre_archivo"].lower()
-        texto_lower = c["texto"].lower()
+        nombre_norm = normalizar_texto_simple(c["nombre_archivo"])
+        texto_norm = normalizar_texto_simple(c["texto"])
         
-        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
-        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
+        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_norm) if palabras_especificas else 0
+        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_norm) if palabras_especificas else 0
 
-        # REGLA B CORREGIDA: Si detecta palabras clave del título de un nuevo PDF, le da prioridad absoluta (+50)
-        if matches_nombre >= 1 and usuario_solicita_nuevo_doc:
-            chunk_scores[c["chunk_id"]] += 50.0
+        # Prioridad a títulos coincidentes
+        if matches_nombre >= 1:
+            chunk_scores[c["chunk_id"]] += 30.0 * matches_nombre
 
-        # REGLA A CORREGIDA: Solo aplica el anclaje si el usuario NO solicitó un documento distinto
-        elif doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
-            chunk_scores[c["chunk_id"]] += 15.0  # Bajamos de 35 a 15 para no "secuestrar" la búsqueda
+        # Anclaje suave al contexto anterior sólo si no cambió de tema
+        elif doc_activo_previo and doc_activo_previo in nombre_norm and not usuario_solicita_nuevo_doc:
+            chunk_scores[c["chunk_id"]] += 5.0
 
-        # REGLA C: Coincidencia de números de actividad
+        # Coincidencia con números de actividad
         if numeros_buscados:
-            matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
+            matches_numeros = sum(1 for num in numeros_buscados if num in texto_norm or num in nombre_norm)
             if matches_numeros == len(numeros_buscados):
                 chunk_scores[c["chunk_id"]] += 8.0
 
-        # Coincidencia textual general
+        # Coincidencia en cuerpo del texto
         if matches_texto > 0 and palabras_especificas:
-            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 5.0
-            
-    # 5. Selección y ordenamiento de resultados
+            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 4.0
+
+    # 5. Selección final de fragmentos
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
         reverse=True
     )
     
-    top_chunks = [c for c in chunks_ordenados_por_score if chunk_scores[c["chunk_id"]] > 0.5]
-    documentos_principales = set(c["nombre_archivo"] for c in top_chunks[:3])
-
     chunks_finales = []
     for c in chunks_ordenados_por_score:
-        if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
+        if chunk_scores[c["chunk_id"]] > 0.5 and len(chunks_finales) < 10:
             chunks_finales.append(c)
 
-    if documentos_principales:
+    if chunks_finales:
+        doc_principal = chunks_finales[0]["nombre_archivo"]
         for c in chunks_data:
-            if c["nombre_archivo"] in documentos_principales:
-                if "[TIPO: ACTIVIDAD FINAL" in c["texto"] and c not in chunks_finales:
+            if c["nombre_archivo"] == doc_principal and "[TIPO: ACTIVIDAD FINAL" in c["texto"]:
+                if c not in chunks_finales:
                     chunks_finales.append(c)
+                    break
 
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
@@ -344,6 +342,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
         fuentes_usadas.add(f"{chunk['nombre_archivo']} (Pág. {chunk['pagina']})")
             
     return contexto_recuperado, sorted(list(fuentes_usadas))
+
 # ------------------------------------------------------------------------------
 # 5. Renderizado e Interfaz de Usuario
 # ------------------------------------------------------------------------------
@@ -397,6 +396,57 @@ for idx, message in enumerate(st.session_state.messages):
 # ------------------------------------------------------------------------------
 # 6. Procesamiento de Preguntas y Medición de Tiempo
 # ------------------------------------------------------------------------------
+
+PLANTILLA_SYSTEM_PROMPT = """
+Eres Clio, el asistente virtual oficial de la empresa. Tu objetivo es explicar procesos, políticas y manuales operativos con máximo detalle, exactitud profesional y rigor.
+
+=== INSTRUCCIONES DE ATENCIÓN Y NAVEGACIÓN ===
+
+1. FLEXIBILIDAD DE CONTEXTO:
+   - El usuario puede cambiar de tema, procedimiento o documento en cualquier momento de la conversación.
+   - NUNCA asumas que la consulta actual debe continuar limitada al documento o procedimiento mencionado en los mensajes anteriores.
+
+2. EVALUACIÓN DE INFORMACIÓN DISPONIBLE:
+   - Revisa minuciosamente TODOS los fragmentos e información provistos en el contexto de búsqueda actual.
+   - Si en el contexto encuentras información de un documento diferente al que venían hablando (por ejemplo, el procedimiento "PR-EAC-PRM-023 Destrucción de Cartas"), utilízalo de inmediato para responder la pregunta del usuario.
+
+3. REGLAS DE RESPUESTA:
+   - Responde de forma clara, directa y estructurada utilizando exclusivamente la información del contexto provisto.
+   - Si la información sobre el nuevo tema/documento solicitado realmente NO se encuentra presente en el contexto provisto, indícalo amablemente sin asumir que el documento no existe en la organización.
+
+FRAGMENTOS RECUPERADOS DE LOS MANUALES OFICIALES:
+\"\"\"
+{contexto_filtrado}
+\"\"\"
+
+REGLAS DE RESPUESTA UNIVERSALES:
+1. EXPLICACIÓN COMPLETA DE PROCESOS:
+   - Al explicar el inicio, detonador o conclusión de cualquier proceso, NO te limites a los resúmenes ejecutivos de carátula si la documentación contiene la matriz detallada de actividades.
+   - Para definir el EVENTO FINAL o CONCLUSIÓN de cualquier proceso, busca en la matriz de actividades la actividad específica que marque el término del flujo (indicada por leyendas como 'Fin de Procedimiento', 'Conclusión', o la última actividad numerada de la secuencia). No confundir con revisiones rutinarias intermedias.
+
+2. EXTRAER DATOS CLAVE DE LA MATRIZ:
+   Siempre que la información esté disponible en los fragmentos, detalla:
+   - ID / Número de Actividad.
+   - Posición / Rol responsable de ejecutarla.
+   - Descripción concreta de la acción y canales empleados (correos, sistemas, etc.).
+   - Entregable, documento o resultado final.
+
+3. EXHAUSTIVIDAD EN LISTAS Y FLUJOS:
+   - Revisa todos los fragmentos recibidos de principio a fin para descartar imprecisiones.
+
+4. ESTILO Y FORMATO:
+   - Usa un tono corporativo, claro y estructurado con viñetas.
+   - Utiliza negritas para resaltar roles, códigos de documentos y números de actividad.
+
+5. FORMATO DE FUENTE OBLIGATORIO:
+   - Al final de cualquier respuesta operativa, coloca la etiqueta `---FUENTE---` en una línea nueva y abajo enlista los documentos y páginas utilizados:
+     Ejemplo:
+     ---FUENTE---
+     * Nombre_Documento.pdf (Pág. X)
+
+6. Para saludos o preguntas generales de cortesía, responde brevemente sin usar `---FUENTE---`.
+"""
+
 if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
     
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -413,36 +463,9 @@ if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
                     historial=st.session_state.messages
                 )
 
-                SYSTEM_PROMPT = f"""
-Eres Clio, el asistente virtual oficial de la empresa. Tu objetivo es explicar procesos, políticas y manuales operativos con máximo detalle, exactitud profesional y rigor.
-
-FRAGMENTOS RECUPERADOS DE LOS MANUALES OFICIALES:
-\"\"\"
-{contexto_filtrado if contexto_filtrado else "No se encontraron fragmentos relevantes."}
-\"\"\"
-
-REGLAS DE RESPUESTA UNIVERSALES:
-1. EXPLICACIÓN COMPLETA DE PROCESOS:
-   - Al explicar el inicio, detonador o conclusión de cualquier proceso, NO te limites a los resúmenes ejecutivos de carátula si la documentación contiene la matriz detallada de actividades.
-   - Para definir el EVENTO FINAL o CONCLUSIÓN de cualquier proceso, busca en la matriz de actividades la actividad específica que marque el término del flujo (indicada por leyendas como 'Fin de Procedimiento', 'Conclusión', o la última actividad numerada de la secuencia). No confundir con revisiones rutinarias intermedias.
-2. EXTRAER DATOS CLAVE DE LA MATRIZ:
-   Siempre que la información esté disponible en los fragmentos, detalla:
-   - ID / Número de Actividad.
-   - Posición / Rol responsable de ejecutarla.
-   - Descripción concreta de la acción y canales empleados (correos, sistemas, etc.).
-   - Entregable, documento o resultado final.
-3. EXHAUSTIVIDAD EN LISTAS Y FLUJOS:
-   - Revisa todos los fragmentos recibidos de principio a fin para descartar imprecisiones.
-4. ESTILO Y FORMATO:
-   - Usa un tono corporativo, claro y estructurado con viñetas.
-   - Utiliza negritas para resaltar roles, códigos de documentos y números de actividad.
-5. FORMATO DE FUENTE OBLIGATORIO:
-   - Al final de cualquier respuesta operativa, coloca la etiqueta `---FUENTE---` en una línea nueva y abajo enlista los documentos y páginas utilizados:
-     Ejemplo:
-     ---FUENTE---
-     * Nombre_Documento.pdf (Pág. X)
-6. Para saludos o preguntas generales de cortesía, responde brevemente sin usar `---FUENTE---`.
-"""
+                prompt_final = PLANTILLA_SYSTEM_PROMPT.format(
+                    contexto_filtrado=contexto_filtrado if contexto_filtrado else "No se encontraron fragmentos relevantes."
+                )
 
                 chat_history = []
                 for msg in st.session_state.messages[:-1]:
@@ -462,11 +485,10 @@ REGLAS DE RESPUESTA UNIVERSALES:
                 )
 
                 gemini_config = types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
+                    system_instruction=prompt_final,
                     temperature=0.0,
                 )
 
-                # LÓGICA DE REINTENTOS AUTOMÁTICOS (MÁXIMO 3 INTENTOS)
                 max_reintentos = 3
                 response = None
 
@@ -477,13 +499,13 @@ REGLAS DE RESPUESTA UNIVERSALES:
                             contents=chat_history,
                             config=gemini_config
                         )
-                        break # Si tuvo éxito, sale del bucle de reintentos
+                        break
                     except APIError as e:
                         if ("503" in str(e) or "UNAVAILABLE" in str(e)) and intento < max_reintentos - 1:
-                            tiempo_espera = (intento + 1) * 2  # Espera 2s en el 1er fallo, 4s en el 2do fallo
+                            tiempo_espera = (intento + 1) * 2
                             time.sleep(tiempo_espera)
                             continue
-                        raise e # Si es otro error o ya superó los 3 reintentos, lanza la excepción
+                        raise e
 
                 tiempo_total = time.time() - inicio_tiempo
 
