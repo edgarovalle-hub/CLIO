@@ -231,13 +231,16 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida (Anclaje de Hilo Garantizado)
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 4. Búsqueda RAG Híbrida (Detección de Cambio de Tema y Fluidez de Hilo)
+# ------------------------------------------------------------------------------
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
 
     doc_activo_previo = None
 
-    # 1. Recuperar el documento activo de la última interacción
+    # 1. Recuperar el documento activo del historial
     if historial:
         for msg in reversed(historial):
             if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
@@ -266,46 +269,68 @@ def buscar_contexto_relevante(pregunta, historial=None):
         "responsable", "quien", "quién", "id", "numero", "número", "inicial", "termina", "termino", "término"
     }
 
-    # Palabras sustantivas únicas
     palabras_especificas = [
         w for w in re.findall(r'\w+', query_lower) 
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS and not w.isdigit()
     ]
 
-    # 2. DETECCIÓN DE CAMBIO EXPLÍCITO DE MANUAL
-    # Verificamos si el usuario está citando explícitamente el nombre de un nuevo PDF
+    # 2. INDICADORES DE CAMBIO DE TEMA POR SINTAXIS
+    # Detecta frases como "del procedimiento X", "en el manual Y", "del proceso Z"
+    patron_cambio = r'(?:del|en el|sobre el|para el)\s+(?:procedimiento|proceso|manual|documento)\s+([a-záéíóúñ0-9\s]{3,30})'
+    mencion_explicita_proceso = re.search(patron_cambio, query_lower)
+    
     usuario_solicita_nuevo_doc = False
+    
+    # A) Verificación por títulos de archivos
     if palabras_especificas:
         for c in chunks_data:
             nombre_lower = c["nombre_archivo"].lower()
             matches_nom = sum(1 for kw in palabras_especificas if kw in nombre_lower)
-            if matches_nom >= 2:
+            if matches_nom >= 1 and (mencion_explicita_proceso or len(palabras_especificas) >= 2):
                 usuario_solicita_nuevo_doc = True
                 break
 
-    # 3. CONSTRUCCIÓN DE LA CONSULTA VECTORIAL
-    # Si hay un doc activo y el usuario NO pidió un manual nuevo, forzamos la búsqueda dentro del doc activo
+    # 3. BÚSQUEDA VECTORIAL DUAL (Sin forzar el documento anterior primero)
+    q_vector_pura = embedder.encode([pregunta])
+    q_vector_pura = np.array(q_vector_pura, dtype="float32")
+    faiss.normalize_L2(q_vector_pura)
+    
+    distances_pura, indices_pura = vector_index.search(q_vector_pura, k=15)
+    
+    # Evaluar si la búsqueda pura encuentra un documento fuerte diferente al activo
+    doc_top_vectorial = None
+    max_sim_pura = 0.0
+    if indices_pura[0][0] < len(chunks_data):
+        doc_top_vectorial = chunks_data[indices_pura[0][0]]["nombre_archivo"].lower()
+        max_sim_pura = float(distances_pura[0][0])
+
+    # Si la búsqueda vectorial pura encuentra algo muy afín que NO es el doc anterior, aceptamos cambio de tema
+    if doc_activo_previo and doc_top_vectorial and doc_activo_previo not in doc_top_vectorial:
+        if max_sim_pura > 0.55 or mencion_explicita_proceso:
+            usuario_solicita_nuevo_doc = True
+
+    # 4. CONSTRUCCIÓN DE LA CONSULTA FINAL PARA FAISS
     query_para_vector = pregunta
     if doc_activo_previo and not usuario_solicita_nuevo_doc:
         nombre_limpio = doc_activo_previo.replace(".pdf", "").replace("_", " ").replace("-", " ")
         query_para_vector = f"{pregunta} {nombre_limpio}"
 
-    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 4. Búsqueda Vectorial Semántica
-    q_vector = embedder.encode([query_para_vector])
-    q_vector = np.array(q_vector, dtype="float32")
-    faiss.normalize_L2(q_vector)
+    q_vector_final = embedder.encode([query_para_vector])
+    q_vector_final = np.array(q_vector_final, dtype="float32")
+    faiss.normalize_L2(q_vector_final)
     
-    distances, indices = vector_index.search(q_vector, k=25)
+    distances, indices = vector_index.search(q_vector_final, k=25)
     
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
             score_vectorial = float(sim) * 10.0
             chunk_scores[idx] += score_vectorial
 
-    # 5. PONDERACIÓN Y ANCLAJE
+    # 5. ASIGNACIÓN RACIONAL DE BONOS
+    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
+
     for c in chunks_data:
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
@@ -313,25 +338,23 @@ def buscar_contexto_relevante(pregunta, historial=None):
         matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower) if palabras_especificas else 0
         matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower) if palabras_especificas else 0
 
-        # REGLA A: Si hay un doc activo y NO hay solicitud explícita de cambio -> Mantener anclaje prioritario
+        # Mantenimiento de Hilo: Solo si NO hay cambio de tema detectado
         if doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
-            chunk_scores[c["chunk_id"]] += 25.0
+            chunk_scores[c["chunk_id"]] += 12.0
 
-        # REGLA B: Si el usuario solicitó explícitamente un nuevo manual
-        if usuario_solicita_nuevo_doc and matches_nombre >= 2:
-            chunk_scores[c["chunk_id"]] += 30.0
+        # Impulso a nuevos documentos solicitados
+        if usuario_solicita_nuevo_doc and matches_nombre > 0:
+            chunk_scores[c["chunk_id"]] += matches_nombre * 8.0
 
-        # REGLA C: Números de actividades
         if numeros_buscados:
             matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
             if matches_numeros == len(numeros_buscados):
                 chunk_scores[c["chunk_id"]] += 5.0
 
-        # Coincidencias de texto
         if matches_texto > 0 and palabras_especificas:
             chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
 
-    # 6. Selección de Fragmentos
+    # 6. Selección y Ordenamiento
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
@@ -343,7 +366,6 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if chunk_scores[c["chunk_id"]] > 1.0 and len(chunks_finales) < 10:
             chunks_finales.append(c)
 
-    # Asegurar fragmentos de fin de procedimiento
     documentos_principales = set(c["nombre_archivo"] for c in chunks_finales[:2])
     if documentos_principales:
         for c in chunks_data:
