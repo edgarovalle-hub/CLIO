@@ -302,12 +302,11 @@ def buscar_contexto_relevante(pregunta, historial=None):
         fuentes_usadas.add(f"{chunk['nombre_archivo']} (Pág. {chunk['pagina']})")
 
     # === IMPRESION DE CONTROL EN CONSOLA (DEBUG) ===
-    print("\n--- DEBUG DE BÚSQUEDA ---")
-    print(f"Total chunks en base de datos: {len(chunks_data)}")
-    print(f"Documentos encontrados en el Top 10:")
-    for c in chunks_finales:
-        print(f" -> {c['nombre_archivo']} (Score: {chunk_scores[c['chunk_id']]})")
-    print("---------------------------\n")
+    import streamlit as st
+    st.info(f"📊 **Total chunks cargados en la base de datos:** {len(chunks_data)}")
+    
+    docs_top = [f"{c['nombre_archivo']} (Score: {chunk_scores[c['chunk_id']]:.1f})" for c in chunks_finales]
+    st.write("🔍 **Documentos encontrados para esta pregunta:**", docs_top)
 
     return contexto_recuperado, sorted(list(fuentes_usadas))
             
