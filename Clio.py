@@ -217,6 +217,10 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida (Opción B)
 # ------------------------------------------------------------------------------
+import re
+import unicodedata
+import numpy as np
+
 def corregir_utf8_corrupto(texto):
     if not texto:
         return ""
@@ -248,7 +252,8 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
         "existe", "algún", "paso", "entre", "confirma", "únicamente", "presente", "diagrama",
         "conector", "pasa", "directo", "otro", "flujo", "compuerta", "decisión", "desicion",
         "encargado", "ejecutar", "rol", "departamento", "tiene", "indícame", "indicame",
-        "flecha", "regreso", "retrabajo", "ciclo", "regresa", "sale", "que", "exacta", "sigue"
+        "flecha", "regreso", "retrabajo", "ciclo", "regresa", "sale", "que", "exacta", "sigue",
+        "primer", "primer paso", "ultimo", "último", "ultimo paso", "último paso"
     }
 
     palabras_especificas = [
@@ -258,42 +263,57 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
 
     numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
 
-    # Inicializar puntajes
+    # 1. DETECTAR SI SE MENCIONA OTRO DOCUMENTO EXPLÍCITAMENTE
+    menciona_otro_doc = False
+    if palabras_especificas:
+        for c in chunks_data:
+            nombre_norm = normalizar_texto(c["nombre_archivo"])
+            # Si hay palabras en la pregunta que coinciden con el título de UN DOCUMENTO DISTINTO al activo
+            if doc_activo_norm and doc_activo_norm not in nombre_norm:
+                if any(kw in nombre_norm for kw in palabras_especificas):
+                    menciona_otro_doc = True
+                    break
+
+    # 2. ENRIQUECER LA CONSULTA SI LA PREGUNTA ES CONTINUACIÓN
+    if doc_activo_actual and not menciona_otro_doc:
+        query_vectorial = f"{doc_activo_actual} {pregunta}"
+    else:
+        query_vectorial = pregunta
+
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
-    # 1. Búsqueda Vectorial Pura (Similitud semántica de FAISS)
-    q_vector = embedder.encode([pregunta])
+    # 3. BÚSQUEDA VECTORIAL EN FAISS
+    q_vector = embedder.encode([query_vectorial])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=25)
+    distances, indices = vector_index.search(q_vector, k=30)
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
-            chunk_scores[idx] += float(sim) * 10.0  # La similitud semántica lidera la búsqueda
+            chunk_scores[idx] += float(sim) * 10.0
 
-    # 2. Ajuste de Puntuación Equilibrado (sin bloqueos rígidos)
+    # 4. REFORZAR DOCUMENTO ACTIVO SI ES UNA PREGUNTA DE SEGUIMIENTO
     for c in chunks_data:
         nombre_norm = normalizar_texto(c["nombre_archivo"])
         texto_norm = normalizar_texto(c["texto"])
         
-        # Coincidencia de términos clave específicos en el texto (ej. "baccarat")
+        # Si estamos en continuidad del mismo documento, priorizar sus fragmentos
+        if doc_activo_norm and doc_activo_norm in nombre_norm and not menciona_otro_doc:
+            chunk_scores[c["chunk_id"]] += 20.0
+
+        # Coincidencias de palabras clave
         if palabras_especificas:
             matches_texto = sum(1 for kw in palabras_especificas if kw in texto_norm)
             if matches_texto > 0:
                 chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 5.0
 
-        # Coincidencia por números de actividad
+        # Coincidencias de números de actividad
         if numeros_buscados:
             for num in numeros_buscados:
                 if re.search(r'\b' + re.escape(num) + r'\b', texto_norm):
                     chunk_scores[c["chunk_id"]] += 15.0
 
-        # Bono suave de continuidad (1.5 pts) para que un término clave más fuerte (ej. Baccarat) 
-        # pueda vencer al documento activo si pertenece a otro manual
-        if doc_activo_norm and doc_activo_norm in nombre_norm:
-            chunk_scores[c["chunk_id"]] += 1.5
-
-    # 3. Filtrar y seleccionar fragmentos ganadores
+    # 5. ORDENAR Y SELECCIONAR RESULTADOS
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
@@ -305,7 +325,7 @@ def buscar_contexto_relevante(pregunta, doc_activo_actual=None):
         if chunk_scores[c["chunk_id"]] > 0.1 and len(chunks_finales) < 10:
             chunks_finales.append(c)
 
-    # Actualizar el nuevo documento activo según el fragmento con mejor puntaje
+    # Definir nuevo documento activo
     nuevo_doc_activo = chunks_finales[0]["nombre_archivo"] if chunks_finales else doc_activo_actual
 
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
