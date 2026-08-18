@@ -222,14 +222,16 @@ def buscar_contexto_relevante(pregunta, historial=None):
     query_contextual = pregunta
     doc_activo_previo = None
 
-    # 1. Recuperar el documento activo del historial reciente
+    # 1. Detectar si ya había un documento activo en el historial reciente
     if historial:
         mensajes_usuario = [m["content"] for m in historial if m["role"] == "user"]
         if mensajes_usuario:
             query_contextual = " ".join(mensajes_usuario[-2:])
         
+        # Buscar el nombre del documento en las fuentes de la última respuesta del asistente
         for msg in reversed(historial):
             if msg["role"] == "assistant" and "---FUENTE---" in msg.get("content", ""):
+                # Extrae el nombre del archivo de las fuentes citadas
                 lineas = msg["content"].split("\n")
                 for l in lineas:
                     if ".pdf" in l.lower():
@@ -240,7 +242,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
                 if doc_activo_previo:
                     break
 
-    query_lower = pregunta.lower() # Evaluar la pregunta actual para detectar cambios explícitos de tema
+    query_lower = query_contextual.lower()
     
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
@@ -257,11 +259,11 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if len(w) > 2 and w not in STOPWORDS_OPERATIVAS
     ]
 
-    numeros_buscados = set(re.findall(r'\b\d+\b', pregunta))
+    numeros_buscados = set(re.findall(r'\b\d+\b', query_contextual))
     chunk_scores = {c["chunk_id"]: 0.0 for c in chunks_data}
 
     # 2. Puntuación Vectorial
-    q_vector = embedder.encode([pregunta])
+    q_vector = embedder.encode([query_contextual])
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
@@ -270,37 +272,37 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if idx < len(chunks_data):
             chunk_scores[idx] += float(sim) * 1.5
 
-    # 3. Puntuación Jerárquica Correcta
+    # 3. Puntuación por Palabras, Números y ANCLAJE DE DOCUMENTO
     for c in chunks_data:
         nombre_lower = c["nombre_archivo"].lower()
         texto_lower = c["texto"].lower()
         
-        matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower)
-        matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower)
+        # ANCLAJE DE CONTINUIDAD: Si el fragmento pertenece al documento que ya se estaba discutiendo
+        if doc_activo_previo and doc_activo_previo in nombre_lower:
+            chunk_scores[c["chunk_id"]] += 15.0  # Prioridad absoluta al documento en curso
 
-        # PRIORIDAD 1: Coincidencia explícita del TÍTULO del documento en la pregunta (+20.0)
-        if palabras_especificas and matches_nombre >= 2:
-            chunk_scores[c["chunk_id"]] += 20.0
-        elif matches_nombre == 1:
-            chunk_scores[c["chunk_id"]] += 5.0
-
-        # PRIORIDAD 2: Números de Actividades solicitados (ej. 140, 150)
+        # Coincidencia de números de actividad (ej. 140, 150)
         if numeros_buscados:
             matches_numeros = sum(1 for num in numeros_buscados if num in texto_lower or num in nombre_lower)
             if matches_numeros == len(numeros_buscados):
                 chunk_scores[c["chunk_id"]] += 8.0
             elif matches_numeros > 0:
+                chunk_scores[c["chunk_id"]] += 4.0
+
+        # Coincidencia de palabras clave
+        if palabras_especificas:
+            matches_nombre = sum(1 for kw in palabras_especificas if kw in nombre_lower)
+            matches_texto = sum(1 for kw in palabras_especificas if kw in texto_lower)
+            
+            if matches_nombre == len(palabras_especificas):
+                chunk_scores[c["chunk_id"]] += 5.0
+            elif matches_nombre > 0:
+                chunk_scores[c["chunk_id"]] += 2.0
+
+            if matches_texto == len(palabras_especificas):
                 chunk_scores[c["chunk_id"]] += 3.0
 
-        # PRIORIDAD 3: Anclaje del Historial (+3.0 en lugar de +15.0 para no bloquear búsquedas nuevas)
-        if doc_activo_previo and doc_activo_previo in nombre_lower:
-            chunk_scores[c["chunk_id"]] += 3.0
-
-        # Coincidencia en contenido
-        if matches_texto > 0:
-            chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
-
-    # 4. Selección de fragmentos
+    # 4. Ordenar y seleccionar los mejores fragmentos
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
