@@ -467,9 +467,10 @@ REGLAS DE RESPUESTA UNIVERSALES:
    - Descripción concreta de la acción y canales empleados (correos, sistemas, etc.).
    - Entregable, documento o resultado final.
    - MATRICES RASCI: Evalúa cada columna de forma independiente (Responsable, Aprobador, Soporte, Consultado, Informado). Si una celda intermedia está vacía, repórtala como "N/A" o "Ninguno" para evitar desplazar roles a la columna equivocada.- LECTURA DE MATRICES Y TABLAS (RASCI/RACI):
-        * Mapea estrictamente la intersección fila-columna leyendo el encabezado exacto de cada columna [Actividad | Responsable (R) | Aprobador (A) | Soporte (S) | Consultado (C) | Informado (I)].
+        * Mapea ESTRICTAMENTE la intersección fila-columna leyendo el encabezado exacto de cada columna [Actividad | Responsable (R) | Aprobador (A) | Soporte (S) | Consultado (C) | Informado (I)].
         * Evalúa cada columna de izquierda a derecha. Si una celda intermedia no tiene texto o está vacía, regístrala explícitamente como "N/A" o "Sin asignar".
         * PROHIBIDO desplazar el texto de una columna hacia las columnas adyacentes a su izquierda o derecha.
+        * VERIFICA EXHAUSTIVAMENTE QUE LOS ROLES SEAN EXACTOS Y NO SE DESPLACEN, especialmente en matrices con múltiples filas y columnas.
 
 3. EXHAUSTIVIDAD EN LISTAS Y EVALUACIÓN DE FLUJOS:
    - Revisa todos los fragmentos recibidos de principio a fin para descartar imprecisiones.
