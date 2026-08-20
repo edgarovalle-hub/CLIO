@@ -215,6 +215,9 @@ vector_index, chunks_data = inicializar_base_vectorial(ROOT_FOLDER_ID)
 # ------------------------------------------------------------------------------
 # 4. Búsqueda RAG Híbrida
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 4. Búsqueda RAG Híbrida (Mejorada para Recuperación Exhaustiva)
+# ------------------------------------------------------------------------------
 def buscar_contexto_relevante(pregunta, historial=None):
     if not chunks_data or not vector_index:
         return "", []
@@ -236,7 +239,15 @@ def buscar_contexto_relevante(pregunta, historial=None):
                     break
 
     query_lower = pregunta.lower()
-    
+
+    # DETECCIÓN DE INTENCIÓN DE RECUPERACIÓN COMPLETA
+    KEYWORDS_EXHAUSTIVAS = [
+        "todas las actividades", "todo el proceso", "procedimiento completo",
+        "lista en orden", "lista completa", "todas las tareas", "secuencia completa",
+        "desde el inicio hasta el fin", "diagrama completo", "todos los pasos"
+    ]
+    es_solicitud_exhaustiva = any(kw in query_lower for kw in KEYWORDS_EXHAUSTIVAS)
+
     STOPWORDS_OPERATIVAS = {
         "procedimiento", "proceso", "evento", "inicia", "inicio", "final", 
         "conclusion", "conclusión", "marca", "este", "esta", "estos", "estas",
@@ -257,21 +268,18 @@ def buscar_contexto_relevante(pregunta, historial=None):
     ]
 
     # 2. DETECCIÓN ESTRICTA Y SINTÁCTICA DE CAMBIO DE TEMA
-    # A) Captura estructuras claras de cambio (ej: "del procedimiento X", "en el manual Y", "sobre el proceso Z")
     patron_cambio = r'(?:del|en|para|sobre|respecto\s+a|acerca\s+de|cambiando\s+a)\s+(?:el\s+)?(?:procedimiento|proceso|manual|documento|flujo|protocolo)\s+([a-záéíóúñ0-9\s]{3,50})'
     mencion_estructura = re.search(patron_cambio, query_lower) is not None
 
-    # B) Captura códigos explícitos de archivo (ej: PR-IAO-DCO-040) de OTRO documento
     menciona_codigo_nuevo = False
     if doc_activo_previo:
         codigos_en_pregunta = re.findall(r'\b[a-z]{2,4}-[a-z]{2,4}-[a-z]{2,4}-\d{3}\b', query_lower)
         if codigos_en_pregunta:
             menciona_codigo_nuevo = not any(cod in doc_activo_previo for cod in codigos_en_pregunta)
 
-    # El cambio de tema SOLO se activa si hay intención explícita o no hay documento previo
     usuario_solicita_nuevo_doc = mencion_estructura or menciona_codigo_nuevo or (not doc_activo_previo)
 
-    # 3. CONSTRUCCIÓN DE LA CONSULTA VECTORIAL CON ANCLAJE
+    # 3. CONSTRUCCIÓN DE LA CONSULTA VECTORIAL
     query_para_vector = pregunta
     if doc_activo_previo and not usuario_solicita_nuevo_doc:
         nombre_limpio = doc_activo_previo.replace(".pdf", "").replace("_", " ").replace("-", " ")
@@ -284,7 +292,8 @@ def buscar_contexto_relevante(pregunta, historial=None):
     q_vector = np.array(q_vector, dtype="float32")
     faiss.normalize_L2(q_vector)
     
-    distances, indices = vector_index.search(q_vector, k=25)
+    # Aumentamos K en la búsqueda vectorial inicial a 40 para capturar más fragmentos
+    distances, indices = vector_index.search(q_vector, k=40)
     
     for sim, idx in zip(distances[0], indices[0]):
         if idx < len(chunks_data):
@@ -305,7 +314,6 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if doc_activo_previo and doc_activo_previo in nombre_lower and not usuario_solicita_nuevo_doc:
             chunk_scores[c["chunk_id"]] += 35.0
 
-        # Impulso al nuevo documento si fue solicitado de forma explícita
         if usuario_solicita_nuevo_doc and matches_nombre > 0:
             chunk_scores[c["chunk_id"]] += matches_nombre * 10.0
 
@@ -317,7 +325,7 @@ def buscar_contexto_relevante(pregunta, historial=None):
         if matches_texto > 0 and palabras_especificas:
             chunk_scores[c["chunk_id"]] += (matches_texto / len(palabras_especificas)) * 2.0
 
-    # 6. Selección y Ordenamiento
+    # 6. Selección y Ordenamiento Dinámico
     chunks_ordenados_por_score = sorted(
         chunks_data, 
         key=lambda c: chunk_scores[c["chunk_id"]], 
@@ -325,17 +333,32 @@ def buscar_contexto_relevante(pregunta, historial=None):
     )
     
     chunks_finales = []
-    for c in chunks_ordenados_por_score:
-        if chunk_scores[c["chunk_id"]] > 1.0 and len(chunks_finales) < 10:
-            chunks_finales.append(c)
 
-    documentos_principales = set(c["nombre_archivo"] for c in chunks_finales[:2])
+    # LÓGICA ESPECIAL PARA CONSULTAS EXHAUSTIVAS
+    if es_solicitud_exhaustiva and chunks_ordenados_por_score:
+        # 1. Identificar cuál es el documento principal según el mejor score
+        doc_objetivo = chunks_ordenados_por_score[0]["nombre_archivo"]
+        
+        # 2. Traer TODOS los chunks de la matriz de ese documento sin importar la nota del vector
+        for c in chunks_data:
+            if c["nombre_archivo"] == doc_objetivo and c["es_matriz"]:
+                chunks_finales.append(c)
+    else:
+        # Lógica estándar de tope (aumentado a máximo 20 chunks si se requiere más precisión)
+        limite_max = 20
+        for c in chunks_ordenados_por_score:
+            if chunk_scores[c["chunk_id"]] > 1.0 and len(chunks_finales) < limite_max:
+                chunks_finales.append(c)
+
+    # Garantizar inclusión de carátulas/actividades finales si no se atraparon
+    documentos_principales = set(c["nombre_archivo"] for c in chunks_finales[:2]) if chunks_finales else set()
     if documentos_principales:
         for c in chunks_data:
             if c["nombre_archivo"] in documentos_principales:
                 if "[TIPO: ACTIVIDAD FINAL" in c["texto"] and c not in chunks_finales:
                     chunks_finales.append(c)
 
+    # Ordenar estrictamente por Nombre de archivo, Página y ID de Chunk para mantener la cronología
     chunks_ordenados = sorted(chunks_finales, key=lambda x: (x['nombre_archivo'], x['pagina'], x['chunk_id']))
     
     contexto_recuperado = ""
