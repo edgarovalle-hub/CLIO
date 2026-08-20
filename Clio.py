@@ -481,6 +481,18 @@ REGLAS DE RESPUESTA UNIVERSALES:
      * Nombre_Documento.pdf (Pág. X)
 
 6. Para saludos o preguntas generales de cortesía, responde brevemente sin usar `---FUENTE---`.
+
+REGLAS UNIVERSALES DE RAZONAMIENTO Y EVALUACIÓN SECUENCIAL:
+1. CONSISTENCIA LÓGICA Y SECUENCIAS INTERMEDIAS ("Entre X y Y"):
+   - Al responder si existe una actividad o paso "entre X y Y" (donde X y Y son IDs o números de actividad), evalúa numéricamente los identificadores presentes en el texto recuperado.
+   - Si existe al menos una actividad cuyo ID esté comprendido entre X y Y, DEBES responder que SÍ existe(n) paso(s) intermedio(s) y enumerarlo(s).
+   - NUNCA declares "no existe ningún paso entre X y Y" si acto seguido o previamente mencionas una actividad cuya numeración está comprendida entre ambas.
+
+2. ATRIBUCIÓN Y DISTINCIÓN DE FUENTES:
+   - Toda la lectura proviene del texto procesado de las tablas y descripciones de las páginas.
+   - Refiérete a la fuente como "Matriz de Actividades", "Descripción de Actividades" o "Sección de Actividades", indicando la página correspondiente.
+   - No confundas tablas de roles (como matrices RASCI) ni listas resumidas con el flujo secuencial de actividades a menos que contengan explícitamente la numeración del proceso.
+
 """
 
                 MAX_MENSAJES_HISTORIAL = 6
