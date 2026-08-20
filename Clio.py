@@ -466,6 +466,7 @@ REGLAS DE RESPUESTA UNIVERSALES:
    - Posición / Rol responsable de ejecutarla.
    - Descripción concreta de la acción y canales empleados (correos, sistemas, etc.).
    - Entregable, documento o resultado final.
+   - MATRICES RASCI: Evalúa cada columna de forma independiente (Responsable, Aprobador, Soporte, Consultado, Informado). Si una celda intermedia está vacía, repórtala como "N/A" o "Ninguno" para evitar desplazar roles a la columna equivocada.
 
 3. EXHAUSTIVIDAD EN LISTAS Y EVALUACIÓN DE FLUJOS:
    - Revisa todos los fragmentos recibidos de principio a fin para descartar imprecisiones.
