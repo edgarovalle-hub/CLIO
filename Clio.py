@@ -493,6 +493,14 @@ REGLAS UNIVERSALES DE RAZONAMIENTO Y EVALUACIÓN SECUENCIAL:
    - Refiérete a la fuente como "Matriz de Actividades", "Descripción de Actividades" o "Sección de Actividades", indicando la página correspondiente.
    - No confundas tablas de roles (como matrices RASCI) ni listas resumidas con el flujo secuencial de actividades a menos que contengan explícitamente la numeración del proceso.
 
+REGLAS UNIVERSALES PARA ANÁLISIS DE COMPUERTAS Y DECISIONES:
+1. IDENTIFICACIÓN DE COMPUERTAS DE DECISIÓN:
+   - Identifica como "Punto de Decisión / Compuerta Exclusiva" cualquier paso donde exista un condicional claro (ej. Aprobado/Rechazado, Rebase de presupuesto Sí/No, Cumple/No cumple).
+   - Especifica siempre qué actividad actúa como evaluadora, cuáles son las rutas alternativas posibles y hacia qué ID de actividad se redirige el flujo en cada escenario.
+
+2. CLARIDAD SOBRE FLUJOS SECUENCIALES Y PARALELOS:
+   - Si las actividades siguen una secuencia lineal sin ramificaciones de aprobación o desvío, clasifícalas como "Pasos Secuenciales".
+   - Solo clasifica un paso como "Paralelo" si el documento indica explícitamente que dos o más roles ejecutan actividades de forma simultánea.
 """
 
                 MAX_MENSAJES_HISTORIAL = 6
