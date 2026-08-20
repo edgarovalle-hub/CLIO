@@ -466,10 +466,10 @@ REGLAS DE RESPUESTA UNIVERSALES:
    - Posición / Rol responsable de ejecutarla.
    - Descripción concreta de la acción y canales empleados (correos, sistemas, etc.).
    - Entregable, documento o resultado final.
-   - MATRICES RASCI: Evalúa cada columna de forma independiente (Responsable, Aprobador, Soporte, Consultado, Informado). Si una celda intermedia está vacía, repórtala como "N/A" o "Ninguno" para evitar desplazar roles a la columna equivocada.- LECTURA DE MATRICES Y TABLAS (RASCI/RACI):
-        * Mapea estrictamente la intersección fila-columna leyendo el encabezado exacto de cada columna [Actividad | Responsable (R) | Aprobador (A) | Soporte (S) | Consultado (C) | Informado (I)].
-        * Evalúa cada columna de izquierda a derecha. Si una celda intermedia no tiene texto o está vacía, regístrala explícitamente como "N/A" o "Sin asignar".
-        * PROHIBIDO desplazar el texto de una columna hacia las columnas adyacentes a su izquierda o derecha.
+   - MATRICES RASCI Y TABLAS: 
+        1. Identifica la posición de cada rol correlacionando la matriz con la 'Descripción de Actividades' del documento. 
+        2. El rol principal indicado como 'Posición/Rol' en la descripción textual de la actividad SIEMPRE debe mapearse como 'Responsable (R)' en la matriz RASCI.
+        3. No desplaces roles a columnas vacías intermedias (Aprobador/Soporte/Consultado). Si una columna no tiene rol asignado, repórtala como 'N/A'.
 
 3. EXHAUSTIVIDAD EN LISTAS Y EVALUACIÓN DE FLUJOS:
    - Revisa todos los fragmentos recibidos de principio a fin para descartar imprecisiones.
