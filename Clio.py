@@ -467,9 +467,9 @@ REGLAS DE RESPUESTA UNIVERSALES:
    - Descripción concreta de la acción y canales empleados (correos, sistemas, etc.).
    - Entregable, documento o resultado final.
    - MATRICES RASCI Y TABLAS: 
-        1. Identifica la posición de cada rol correlacionando la matriz con la 'Descripción de Actividades' del documento. 
-        2. El rol principal indicado como 'Posición/Rol' en la descripción textual de la actividad SIEMPRE debe mapearse como 'Responsable (R)' en la matriz RASCI.
-        3. No desplaces roles a columnas vacías intermedias (Aprobador/Soporte/Consultado). Si una columna no tiene rol asignado, repórtala como 'N/A'.
+        * Identifica la posición de cada rol correlacionando la matriz con la 'Descripción de Actividades' del documento. 
+        * El rol principal indicado como 'Posición/Rol' en la descripción textual de la actividad SIEMPRE debe mapearse como 'Responsable (R)' en la matriz RASCI.
+        * No desplaces roles a columnas vacías intermedias (Aprobador/Soporte/Consultado). Si una columna no tiene rol asignado, repórtala como 'N/A'.
 
 3. EXHAUSTIVIDAD EN LISTAS Y EVALUACIÓN DE FLUJOS:
    - Revisa todos los fragmentos recibidos de principio a fin para descartar imprecisiones.
