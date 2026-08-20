@@ -242,10 +242,11 @@ def buscar_contexto_relevante(pregunta, historial=None):
 
     # DETECCIÓN DE INTENCIÓN DE RECUPERACIÓN COMPLETA
     KEYWORDS_EXHAUSTIVAS = [
-        "todas las actividades", "todo el proceso", "procedimiento completo",
-        "lista en orden", "lista completa", "todas las tareas", "secuencia completa",
-        "desde el inicio hasta el fin", "diagrama completo", "todos los pasos"
-    ]
+    r'todas? las? actividades', r'todo el proceso', r'procedimiento completo',
+    r'lista en orden', r'lista completa', r'todas? las? tareas', r'secuencia completa',
+    r'desde el inicio', r'diagrama completo', r'todos? los? pasos', r'flujo completo',
+    r'camino completo', r'ruta completa', r'describe el camino'  # <--- Agregados
+]
     es_solicitud_exhaustiva = any(kw in query_lower for kw in KEYWORDS_EXHAUSTIVAS)
 
     STOPWORDS_OPERATIVAS = {
