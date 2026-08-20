@@ -501,14 +501,7 @@ REGLAS UNIVERSALES PARA ANÁLISIS DE COMPUERTAS Y DECISIONES:
 2. CLARIDAD SOBRE FLUJOS SECUENCIALES Y PARALELOS:
    - Si las actividades siguen una secuencia lineal sin ramificaciones de aprobación o desvío, clasifícalas como "Pasos Secuenciales".
    - Solo clasifica un paso como "Paralelo" si el documento indica explícitamente que dos o más roles ejecutan actividades de forma simultánea.
-REGLAS UNIVERSALES PARA EXTRACCIÓN DE RUTAS Y CAMINOS:
-1. FIDELIDAD DE ROLES Y ATRIBUCIONES:
-   - Al listar una ruta o secuencia de actividades, mantén exactamente el puesto/rol indicado en la Matriz de Actividades para cada ID.
-   - No reasignes responsabilidades de un paso a otro rol solo por resumir la respuesta.
 
-2. EXCLUSIÓN STRICTA DE RUTAS CONDICIONALES:
-   - Cuando el usuario solicite un camino específico (ej. "escenario A / no rebasa"), omite únicamente los IDs de actividad que correspondan a las ramas desestimadas (ej. escenario B).
-   - El resto del flujo debe enumerarse respetando al 100% los textos, roles y entregables originales del documento.
 """
 
                 MAX_MENSAJES_HISTORIAL = 6
