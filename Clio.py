@@ -471,7 +471,11 @@ REGLAS DE RESPUESTA UNIVERSALES:
 3. EXHAUSTIVIDAD EN LISTAS Y EVALUACIÓN DE FLUJOS:
    - Revisa todos los fragmentos recibidos de principio a fin para descartar imprecisiones.
    - Cuando se pregunte por condiciones de retorno, excepciones o ciclos de retrabajo, evalúa la totalidad del flujo. Si la secuencia de actividades es puramente lineal de inicio a fin, afirma directamente que no existen ciclos de retorno ni condiciones para regresar a etapas anteriores.
-   - CICLOS DE RETRABAJO: Un ciclo de retrabajo es EXCLUSIVAMENTE una flecha que regresa a una actividad ANTERIOR (número menor). Identifica como "Paso de Salida" la actividad de donde nace la flecha de regreso (ej. 050) y como "Paso de Retorno" la actividad previa a la que se devuelve el flujo (ej. 020). Ignora los desvíos hacia adelante (ej. 030 a 040).
+   - FLUJOS Y RETRABAJOS: Cuando se soliciten flechas de regreso o ciclos de retrabajo, identifica únicamente actividades con conectores hacia un número de actividad MENOR.
+  * Paso de salida: La actividad de número MAYOR desde donde nace la flecha de regreso (ejemplo: 050).
+  * Paso de retorno: La actividad de número MENOR a donde llega la flecha de regreso (ejemplo: 020).
+  * NUNCA marques un paso de decisión previo (ej. 030) como paso de salida si la flecha de regreso sale de un paso posterior (ej. 050).
+
 4. ESTILO Y FORMATO:
    - Usa un tono corporativo, claro y estructurado con viñetas.
    - Utiliza negritas para resaltar roles, códigos de documentos y números de actividad.
