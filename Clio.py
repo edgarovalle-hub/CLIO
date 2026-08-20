@@ -503,10 +503,6 @@ REGLAS UNIVERSALES PARA ANÁLISIS DE COMPUERTAS Y DECISIONES:
    - Si las actividades siguen una secuencia lineal sin ramificaciones de aprobación o desvío, clasifícalas como "Pasos Secuenciales".
    - Solo clasifica un paso como "Paralelo" si el documento indica explícitamente que dos o más roles ejecutan actividades de forma simultánea.
 
-REGLA DE LECTURA Y LECTURA DE MATRICES RASCI:
-1. ALINEACIÓN ESTRICTA DE COLUMNAS:
-   - Al mapear una matriz RASCI o RACI, verifica la correspondencia exacta de cada celda con su encabezado vertical (Responsable | Aprobador | Soporte | Consultado | Informado).
-   - Si una columna intermedia está vacía (ej. Aprobador), reporta explícitamente "No asignado" o "-" para esa columna. No desplaces el contenido de las columnas adyacentes (Soporte) hacia celdas vacías a la izquierda o derecha.
 """
 
                 MAX_MENSAJES_HISTORIAL = 6
