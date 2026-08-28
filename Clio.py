@@ -79,7 +79,7 @@ st.markdown(
         flex-direction: column !important;
         justify-content: space-between !important;
         align-items: flex-end !important;
-        padding-top: 20px !important;
+        padding-top: 40px !important;
         padding-bottom: 10px !important;
         z-index: 0 !important;
         pointer-events: none !important;
