@@ -8,6 +8,7 @@ import requests
 import numpy as np
 import faiss
 import streamlit as st
+import base64
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -23,9 +24,119 @@ MODEL_NAME = "gemini-3.5-flash-lite"
 INDEX_FILE = "faiss_index.bin"
 CHUNKS_FILE = "chunks_data.pkl"
 
-st.set_page_config(page_title="Clio - Asistente Virtual")
-st.title("CLIO")
-st.caption("Asistente virtual especializado en procesos y manuales operativos de la empresa.")
+st.set_page_config(page_title="AS-istente", layout="wide")
+
+@st.cache_data
+def load_base64_images():
+    def get_base64_image(image_path):
+        with open(image_path, "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode()
+    return (
+        get_base64_image("fichas_poker.png"),
+        get_base64_image("Diamante_02.png"),
+        get_base64_image("logo.png"),
+        get_base64_image("Picas_02.png")
+    )
+
+img_base64, imagen_derecha, logo, picas02 = load_base64_images()
+
+# CSS personalizado para imágenes laterales y contenido centralizado
+st.markdown(
+    f"""
+    <style>
+    /* 1. Ocultar scrollbar horizontal global y corregir cálculo de caja */
+    html, body, [data-testid="stAppViewContainer"] {{
+        overflow-x: hidden !important;
+        box-sizing: border-box !important;
+    }}
+
+    *, *:before, *:after {{
+        box-sizing: inherit !important;
+    }}
+
+    /* 2. Imagen Izquierda */
+    .img-izquierda {{
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        height: 100vh !important;
+        width: 15% !important; /* Unificado a % */
+        object-fit: contain !important;
+        object-position: left bottom !important;
+        z-index: 0 !important;
+        pointer-events: none !important;
+        transform: scaleX(-1);
+    }}
+
+    /* 3. Contenedor Derecho (Agrupa las 2 imágenes una sobre otra) */
+    .contenedor-derecho {{
+        position: fixed !important;
+        top: 0 !important;
+        right: 0 !important;
+        height: 100vh !important;
+        width: 15% !important;
+        display: flex !important;
+        flex-direction: column !important;
+        justify-content: space-between !important;
+        align-items: flex-end !important;
+        padding-top: 20px !important;
+        padding-bottom: 10px !important;
+        z-index: 0 !important;
+        pointer-events: none !important;
+    }}
+
+    .contenedor-derecho img {{
+        width: 100% !important;
+        max-height: 48vh !important;
+        object-fit: contain !important;
+    }}
+
+    /* 4. Ajustar el área principal con margen centrado */
+    .stMainBlockContainer {{
+        max-width: 70% !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        padding-left: 2rem !important;
+        padding-right: 2rem !important;
+        padding-top: 2rem !important;
+    }}
+
+    /* 5. Quitar fondo negro inferior y centrar el chat al 70% */
+    [data-testid="stBottom"],
+    div[data-testid="stBottom"] > div:first-child {{
+        background: transparent !important;
+        background-color: transparent !important;
+    }}
+
+    [data-testid="stBottom"] > div {{
+        max-width: 70% !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }}
+
+    [data-testid="stChatInput"] {{
+        max-width: 70% !important; /* <--- Cambiado a 100% para llenar la barra centradita */
+        width: 70% !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+    }}
+    </style>
+
+    <!-- Imagen Izquierda -->
+    <img src="data:image/png;base64,{picas02}" class="img-izquierda">
+
+    <!-- Contenedor Derecho con 2 imágenes -->
+    <div class="contenedor-derecho">
+        <img src="data:image/png;base64,{logo}">    <!-- Imagen Superior -->
+        <img src="data:image/png;base64,{imagen_derecha}">   <!-- Imagen Inferior -->
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# Título y encabezado centrado directamente
+st.title("AS-istente")
+st.caption("Tengo la carta ganadora para tu duda.")
 
 @st.cache_resource
 def get_gemini_client():
@@ -441,7 +552,7 @@ if prompt := st.chat_input("¿En qué te puedo ayudar hoy?"):
                 )
 
                 SYSTEM_PROMPT = f"""
-Eres Clio, el asistente virtual oficial de la empresa. Tu objetivo es explicar procesos, políticas y manuales operativos con máximo detalle, exactitud profesional y rigor.
+Eres Clio, una compañera de trabajo experta, amable y muy servicial. Tu objetivo es guiar a los colaboradores de la empresa explicándoles los procesos y políticas de forma clara, natural y conversacional, como si se lo estuvieras explicando a un compañero en la oficina, mantén un tono ameno, vibrante, entretenido, amigable y cálido. Saluda solo cuando sea el primer mensaje de la conversacioón.
 
 FRAGMENTOS RECUPERADOS DE LOS MANUALES OFICIALES:
 \"\"\"
@@ -480,8 +591,10 @@ REGLAS DE RESPUESTA UNIVERSALES:
   * NUNCA marques un paso de decisión previo (ej. 030) como paso de salida si la flecha de regreso sale de un paso posterior (ej. 050).
 
 4. ESTILO Y FORMATO:
-   - Usa un tono corporativo, claro y estructurado con viñetas.
-   - Utiliza negritas para resaltar roles, códigos de documentos y números de actividad.
+   - Saludos: Si la conversación ya ha iniciado, evita los saludos y ve directo a responder la duda de forma amable y fluida.
+   - Entradas naturales: En lugar de saludar, usa conectores directos como: "Sobre lo que me preguntas...", "Respecto a ese paso...", "Te cuento:", "En ese caso...".
+   - Lenguaje cercano: Explica con tus propias palabras pero manteniendo la precisión de los datos. Evita sonar como un bot rígido o un copiar-pegar del manual, recuerda usar un tono ameno, vibrante, entretenido, amigable y cálido.
+   - Formato limpio: Usa viñetas breves y negritas para resaltar lo importante (roles, documentos, IDs), sin sobrecargar el texto.
 
 5. FORMATO DE FUENTE OBLIGATORIO:
    - Al final de cualquier respuesta operativa, coloca la etiqueta `---FUENTE---` en una línea nueva y abajo enlista los documentos y páginas utilizados:
